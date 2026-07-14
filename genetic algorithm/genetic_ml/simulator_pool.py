@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import queue
 import threading
 from typing import Any
@@ -8,7 +7,6 @@ from typing import Any
 from genetic_ml.config import SimulatorRunConfig
 from genetic_ml.failure_log import FailureLogger
 from genetic_ml.simulator_process import SimulatorProcess
-from genetic_ml.three_way_compare import dump_cpp_trace_for_crash
 
 
 class SimulatorPool:
@@ -89,13 +87,7 @@ class SimulatorPool:
                         path = failure_logger.log(kind, candidate)
                         print(f"[{kind}] candidate id={candidate.get('id')} -> {path}")
                     except OSError:
-                        path = None
-                    if path is not None:
-                        try:
-                            candidate_json = json.dumps(candidate, separators=(",", ":"))
-                            dump_cpp_trace_for_crash(candidate.get("id"), candidate_json, path.parent)
-                        except Exception as trace_exc:
-                            print(f"  crash-trace dump failed: {trace_exc}")
+                        pass
                 try:
                     worker.close()
                 except Exception:

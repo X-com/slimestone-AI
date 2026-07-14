@@ -69,10 +69,8 @@ def run_ga(
     archive_flush_every: int = 100,
 ) -> GAResult:
     """pool lets a caller supply an already-constructed SimulatorPool (or subclass) instead of
-    having run_ga build a plain one - e.g. genetic_ml.three_way_pool.ThreeWaySimulatorPool, which
-    cross-checks every candidate against the other two simulators as a side effect while still
-    returning the same cpp-driven results this loop's selection logic expects. Defaults to None,
-    which preserves the exact previous behavior (construct a plain SimulatorPool here).
+    having run_ga build a plain one. Defaults to None, which preserves the exact previous
+    behavior (construct a plain SimulatorPool here).
 
     working_writer similarly lets a caller supply an already-constructed writer - anything with
     a save(candidate) -> Path method, e.g. genetic_ml.compact_working_writer.CompactWorkingWriter

@@ -13,7 +13,6 @@ from genetic_ml.working_folder import WorkingFolderWriter
 PROJECT_ROOT = Path(__file__).resolve().parent
 SIMULATOR_EXE = (
     PROJECT_ROOT.parent
-    / "java-mcp simulator"
     / "cpp simulator"
     / "build"
     / "cpp_simulator_stream.exe"

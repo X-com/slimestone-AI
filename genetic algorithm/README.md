@@ -1,7 +1,7 @@
 # Genetic ML Simulator Bridge
 
 This project runs flying-machine JSON candidates through the C++ stream simulator in
-`../java-mcp simulator/cpp extract`.
+`../cpp simulator`.
 
 The current milestone is the simulator bridge, not model training:
 
@@ -13,7 +13,7 @@ candidate JSON line -> long-lived C++ worker -> result JSON line
 
 New to this project? Here's the shortest path to a working run.
 
-1. **Open the right folder.** In VS Code, open `xcom/genetic-ml` itself (not the
+1. **Open the right folder.** In VS Code, open `genetic algorithm` itself (not the
    whole repo) as the workspace folder - the `.vscode/` config in this folder
    (pytest discovery, debug configs) is scoped to it.
 2. **Pick a Python interpreter.** Any Python 3.11+ works; there are no third-party
@@ -21,10 +21,9 @@ New to this project? Here's the shortest path to a working run.
    status bar, or `Ctrl+Shift+P` -> "Python: Select Interpreter") if one isn't
    already selected.
 3. **Check the simulator .exe exists.** This project drives a prebuilt C++ binary
-   at `../java-mcp simulator/cpp extract/build/mcp1122_cpp_stream.exe`. If that
-   file is missing, run `../java-mcp simulator/cpp extract/build-cpp.bat` first (it
-   needs the msys64/ucrt64 MinGW toolchain - see that folder's own README for
-   details).
+   at `../cpp simulator/build/cpp_simulator_stream.exe`. If that file is missing,
+   run `../cpp simulator/build-cpp.bat` first (it needs the msys64/ucrt64 MinGW
+   toolchain).
 4. **Run the simulator bridge.** Open `main.py` and run it (`F5`, the Run/Debug
    button, or Code Runner). This feeds every machine under `data/working/*.json`
    through the simulator and writes `data/outputs/cpp_results.jsonl`. Watch the
@@ -47,7 +46,7 @@ assuming something is wrong with the candidates themselves.
 
 ## Run From VS Code
 
-Open this folder (`xcom/genetic-ml`) in VS Code, edit the variables at the top of
+Open this folder (`genetic algorithm`) in VS Code, edit the variables at the top of
 `main.py` or `main_ga.py`, then run the file - via the Python extension's Run/Debug
 button, `.vscode/launch.json`'s "Run simulator bridge (main.py)" /
 "Run genetic algorithm (main_ga.py)" configs (F5), or the Code Runner extension.
@@ -57,7 +56,7 @@ All three work the same way since both entry points resolve every path from
 The most important setting is:
 
 ```python
-SIMULATOR_EXE = PROJECT_ROOT.parent / "java-mcp simulator" / "cpp extract" / "build" / "mcp1122_cpp_stream.exe"
+SIMULATOR_EXE = PROJECT_ROOT.parent / "cpp simulator" / "build" / "cpp_simulator_stream.exe"
 ```
 
 The C++ process is kept alive and reused for many candidates. `WORKER_COUNT` controls
@@ -162,8 +161,8 @@ feed one straight back into the simulator as-is.
 
 ### Troubleshooting: every candidate reports working=False or crashes
 
-`mcp1122_cpp_stream.exe` is dynamically linked against the msys64/ucrt64 MinGW
-runtime (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`, same toolchain `build-msys2.ps1`
+`cpp_simulator_stream.exe` is dynamically linked against the msys64/ucrt64 MinGW
+runtime (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`, same toolchain `build-cpp.bat`
 builds with) and does not bundle those DLLs next to the executable. If whatever
 shell launches Python has a *different* MinGW runtime earlier on `PATH` - Git for
 Windows bundles its own at `...\Git\mingw64\bin`, for example - Windows loads the

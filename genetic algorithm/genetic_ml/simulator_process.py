@@ -11,8 +11,8 @@ from typing import Any
 from genetic_ml.compact_format import encode_candidate
 from genetic_ml.config import SimulatorRunConfig
 
-# mcp1122_cpp_stream.exe is dynamically linked against the msys64/ucrt64 MinGW
-# runtime (see ../java-mcp simulator/cpp extract/build-msys2.ps1, which builds with
+# cpp_simulator_stream.exe is dynamically linked against the msys64/ucrt64 MinGW
+# runtime (see ../cpp simulator/build-cpp.bat, which builds with
 # C:\msys64\ucrt64\bin\g++.exe) and does not bundle those DLLs next to the exe. If
 # whatever shell launches this Python process has a *different* MinGW runtime
 # earlier on PATH - Git for Windows bundles its own at ...\Git\mingw64\bin, for

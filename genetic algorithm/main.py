@@ -12,10 +12,9 @@ from genetic_ml.simulator_pool import SimulatorPool
 PROJECT_ROOT = Path(__file__).resolve().parent
 SIMULATOR_EXE = (
     PROJECT_ROOT.parent
-    / "java-mcp simulator"
-    / "cpp extract"
+    / "cpp simulator"
     / "build"
-    / "mcp1122_cpp_stream.exe"
+    / "cpp_simulator_stream.exe"
 )
 INPUT_GLOB = PROJECT_ROOT / "data" / "working" / "*.json"
 OUTPUT_JSONL = PROJECT_ROOT / "data" / "outputs" / "cpp_results.jsonl"
