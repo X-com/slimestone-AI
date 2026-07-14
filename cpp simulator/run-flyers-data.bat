@@ -3,7 +3,7 @@ setlocal
 
 set "ROOT=%~dp0"
 set "EXE=%ROOT%build\cpp_simulator_stream.exe"
-set "FLYERS_FILE=%ROOT%..\..\genetic algorithm\data\compact-working\flyers.data"
+set "FLYERS_FILE=%ROOT%..\genetic algorithm\data\compact-working\flyers.data"
 set "PATH=C:\msys64\ucrt64\bin;%PATH%"
 pushd "%ROOT%"
 

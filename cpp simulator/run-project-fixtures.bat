@@ -5,7 +5,7 @@ set "ROOT=%~dp0"
 set "EXE=%ROOT%build\cpp_simulator_stream.exe"
 set "INPUT_DIR=%ROOT%flying-json"
 set "COMPACT_DIR=%ROOT%flying-json-compact"
-set "GENETIC_ML=%ROOT%..\..\genetic-ml"
+set "GENETIC_ML=%ROOT%..\genetic algorithm"
 set "PATH=C:\msys64\ucrt64\bin;%PATH%"
 pushd "%ROOT%"
 

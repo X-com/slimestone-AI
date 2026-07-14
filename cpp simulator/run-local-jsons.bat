@@ -4,7 +4,7 @@ setlocal
 set "ROOT=%~dp0"
 set "EXE=%ROOT%build\cpp_simulator_stream.exe"
 set "COMPACT_DIR=%ROOT%local-jsons-compact"
-set "GENETIC_ML=%ROOT%..\..\genetic-ml"
+set "GENETIC_ML=%ROOT%..\genetic algorithm"
 set "PATH=C:\msys64\ucrt64\bin;%PATH%"
 pushd "%ROOT%"
 

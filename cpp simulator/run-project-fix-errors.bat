@@ -5,7 +5,7 @@ set "ROOT=%~dp0"
 set "EXE=%ROOT%build\cpp_simulator_stream.exe"
 set "INPUT_DIR=%ROOT%error-fix"
 set "COMPACT_DIR=%ROOT%error-fix-compact"
-set "GENETIC_ML=%ROOT%..\..\genetic-ml"
+set "GENETIC_ML=%ROOT%..\genetic algorithm"
 REM Each candidate gets its own file: outlog\cpp-update-trace-<id>.log, instead of every
 REM candidate scrambling into one shared trace file.
 set "TRACE_LOG=%ROOT%outlog\cpp-update-trace.log"
