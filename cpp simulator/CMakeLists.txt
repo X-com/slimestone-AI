@@ -18,7 +18,7 @@ add_executable(mcp1122_cpp_stream
 target_include_directories(mcp1122_cpp_stream PRIVATE src)
 
 if (MSVC)
-    target_compile_options(mcp1122_cpp_stream PRIVATE /W4 /permissive-)
+    target_compile_options(mcp1122_cpp_stream PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(mcp1122_cpp_stream PRIVATE -Wall -Wextra -Wpedantic)
 endif()
