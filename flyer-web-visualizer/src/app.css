@@ -1,0 +1,36 @@
+@import 'tailwindcss';
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* CSS2D hash labels floating over each machine */
+.machine-label {
+  cursor: pointer;
+  user-select: none;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(15, 17, 26, 0.82);
+  color: #e5e7eb;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  white-space: nowrap;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.machine-label:hover {
+  background: #c084fc;
+  color: #0f111a;
+}
+.machine-label.selected {
+  background: #22d3ee;
+  color: #0f111a;
+}
