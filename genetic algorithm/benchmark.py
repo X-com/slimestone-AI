@@ -14,7 +14,7 @@ from genetic_ml.simulator_pool import SimulatorPool
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT_ROOT.parent
-FLYERS_FILE = PROJECT_ROOT / "data" / "compact-working" / "flyers.data"
+FLYERS_FILE = PROJECT_ROOT.parent / "flying machines" / "compact" / "flyers.data"
 
 CPP_EXE = REPO_ROOT / "cpp simulator" / "build" / "cpp_simulator_stream.exe"
 GPU_EXE = REPO_ROOT / "gpu simulator" / "build" / "gpu_kernel_stream.exe"
