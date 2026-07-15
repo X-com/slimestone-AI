@@ -125,7 +125,9 @@ public:
     // every other kMax* cap in this port.
     static constexpr int kSeenCapacity = 16384;
 
-    MCPGPU_HD void bindCube(std::uint32_t* cells, std::int32_t* entryIndex) { world_.bindCube(cells, entryIndex); }
+    MCPGPU_HD void bindCube(std::uint64_t* hashKeys, std::int32_t* hashSlotEntry) {
+        world_.bindCube(hashKeys, hashSlotEntry);
+    }
 
     // Call after simulate() returns and before the next simulate() call on the same worker
     // (Milestone I: one worker now runs many candidates back-to-back) - see

@@ -24,8 +24,15 @@ struct HostCandidate {
 // runBatch().
 void initBlockRegistryDevice();
 
-// Runs every candidate in `batch` as one CUDA thread each, blocking until the whole batch
-// completes, and returns one GpuResult per candidate in the same order.
-std::vector<GpuResult> runBatch(const std::vector<HostCandidate>& batch, int maxTicks);
+// Runs every candidate in `batch` through the persistent work-queue kernel, blocking until the
+// whole batch completes, and returns one GpuResult per candidate in the same order.
+// threadsPerBlock controls the launch config for simulateQueueKernel - see gpu_kernel.cu's
+// runBatch() for how this trades off against per-block resource reservation. 64 is verified
+// stable on this project's own dev card (a memory-constrained 2GB GTX 960); a newer/higher-VRAM
+// GPU may tolerate a larger value for better latency-hiding, but bump it incrementally and
+// re-verify against a full run (output diffed against reference/) rather than assuming a bigger
+// number is free - 128 silently ran the dev card out of memory a few batches into a real run,
+// not at launch time, so a quick smoke test isn't enough to catch a bad value.
+std::vector<GpuResult> runBatch(const std::vector<HostCandidate>& batch, int maxTicks, int threadsPerBlock);
 
 } // namespace mcp1122gpu

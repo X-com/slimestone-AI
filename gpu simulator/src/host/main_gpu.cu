@@ -56,13 +56,13 @@ HostCandidate toHostCandidate(const mcp1122::Candidate& c) {
     return out;
 }
 
-void processStream(std::istream& in, int maxTicks, int batchSize) {
+void processStream(std::istream& in, int maxTicks, int batchSize, int threadsPerBlock) {
     std::vector<HostCandidate> batch;
     mcp1122::Candidate candidate;
 
     auto flush = [&]() {
         if (batch.empty()) return;
-        std::vector<GpuResult> results = runBatch(batch, maxTicks);
+        std::vector<GpuResult> results = runBatch(batch, maxTicks, threadsPerBlock);
         for (const GpuResult& r : results) std::cout << resultToJson(r) << '\n';
         batch.clear();
     };
@@ -85,7 +85,8 @@ void processStream(std::istream& in, int maxTicks, int batchSize) {
 }
 
 void usage() {
-    std::cerr << "usage: gpu_kernel_stream [--max-ticks N] [--batch-size N] [input.dat ...]\n";
+    std::cerr << "usage: gpu_kernel_stream [--max-ticks N] [--batch-size N] [--threads-per-block N] "
+                 "[input.dat ...]\n";
 }
 
 } // namespace
@@ -99,6 +100,13 @@ int main(int argc, char** argv) {
     // --batch-size if a run's candidates are all fast and hitting it would just waste launch
     // overhead, or lower it if a batch contains slow (near-6000-tick) candidates.
     int batchSize = 256;
+    // Verified stable on this project's own dev card (2GB, memory-constrained) - see
+    // gpu_kernel.cu's runBatch() for why this is a CLI flag rather than a compile-time constant:
+    // the right value is GPU-dependent, and a value that's merely "not obviously wrong" isn't
+    // enough to trust here (128 crashed a few batches into a full run on that card, not at
+    // launch). Users with more VRAM headroom can try raising this, but should re-verify against
+    // a full run's output (diffed against reference/'s CPU build), not just a quick smoke test.
+    int threadsPerBlock = 64;
     std::vector<std::string> inputFiles;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -106,6 +114,8 @@ int main(int argc, char** argv) {
             maxTicks = std::atoi(argv[++i]);
         } else if (arg == "--batch-size" && i + 1 < argc) {
             batchSize = std::atoi(argv[++i]);
+        } else if (arg == "--threads-per-block" && i + 1 < argc) {
+            threadsPerBlock = std::atoi(argv[++i]);
         } else if (!arg.empty() && arg[0] == '-') {
             usage();
             return 2;
@@ -120,7 +130,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
         _setmode(_fileno(stdin), _O_BINARY);
 #endif
-        processStream(std::cin, maxTicks, batchSize);
+        processStream(std::cin, maxTicks, batchSize, threadsPerBlock);
     } else {
         for (const std::string& path : inputFiles) {
             std::ifstream in(path, std::ios::binary);
@@ -129,7 +139,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             std::cerr << "========== " << path << " ==========" << '\n';
-            processStream(in, maxTicks, batchSize);
+            processStream(in, maxTicks, batchSize, threadsPerBlock);
         }
     }
 
