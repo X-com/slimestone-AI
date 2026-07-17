@@ -1,0 +1,10 @@
+[project]
+name = "rl-ml"
+version = "0.1.0"
+description = "Reinforcement-learning bridge for training on top of the C++ stream simulator."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

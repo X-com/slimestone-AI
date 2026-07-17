@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import random
+from pathlib import Path
+
+import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
+from genetic_ml.candidate_io import load_candidates_from_glob
+from genetic_ml.compact_working_writer import CompactWorkingWriter
+from genetic_ml.config import SimulatorRunConfig
+
+from rl_ml.policy import SharedLinearPolicy
+from rl_ml.task import Task
+from rl_ml.tasks.dummy_task import DummyTask
+from rl_ml.train_loop import train
+
+# Edit these values in VS Code, then run this file.
+PROJECT_ROOT = Path(__file__).resolve().parent
+SIMULATOR_EXE = (
+    PROJECT_ROOT.parent
+    / "cpp simulator"
+    / "build"
+    / "cpp_simulator_stream.exe"
+)
+
+WORKING_DIR = PROJECT_ROOT / "data" / "working"
+CHECKPOINT_PATH = PROJECT_ROOT / "data" / "checkpoints" / "latest.json"
+ARCHIVE_PATH = PROJECT_ROOT / "data" / "outputs" / "rl_archive.jsonl"
+COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
+# How many distinct working machines CompactWorkingWriter buffers in memory before writing them
+# to flyers.data in one batch. A graceful exit (Ctrl+C or normal completion) always flushes
+# everything regardless of this value - it only controls how often mid-run writes happen.
+COMPACT_FLUSH_EVERY = 100
+
+# Which training objective to run - swap this for a different rl_ml/tasks/*.py implementation to
+# change what's being learned; nothing else in this file (or train_loop.py/policy.py) needs to
+# change when you do.
+TASK: Task = DummyTask()
+
+WORKER_COUNT = 4
+MAX_TICKS = 6000
+SIMULATION_TIMEOUT_SECONDS = 5.0
+
+BATCH_SIZE = 16
+ITERATIONS = 200
+LEARNING_RATE = 0.1
+CHECKPOINT_EVERY = 20
+PROGRESS_EVERY = 10
+RNG_SEED = 1667
+
+# If True and CHECKPOINT_PATH already exists, resume training from its saved weights/iteration
+# count instead of starting a fresh policy.
+RESUME = False
+
+
+def _feature_count(task: Task, base_machines: list[dict], rng: random.Random) -> int:
+    contexts = task.sample_contexts(base_machines, rng, 1)
+    if not contexts:
+        raise RuntimeError("Task produced no contexts to determine feature count from")
+    return len(task.features(contexts[0]))
+
+
+def main() -> None:
+    rng = random.Random(RNG_SEED)
+
+    seeds = load_candidates_from_glob(WORKING_DIR / "*.json")
+    print(f"Loaded {len(seeds)} base machine(s) from {WORKING_DIR}")
+
+    if RESUME and CHECKPOINT_PATH.exists():
+        policy = SharedLinearPolicy.load(CHECKPOINT_PATH)
+        print(f"Resumed policy from {CHECKPOINT_PATH} (iteration {policy.iteration})")
+    else:
+        feature_count = _feature_count(TASK, seeds, rng)
+        policy = SharedLinearPolicy(
+            feature_count=feature_count,
+            learning_rate=LEARNING_RATE,
+            task_name=type(TASK).__name__,
+        )
+
+    simulator_config = SimulatorRunConfig(
+        simulator_path=SIMULATOR_EXE,
+        worker_count=WORKER_COUNT,
+        max_ticks=MAX_TICKS,
+        simulation_timeout_seconds=SIMULATION_TIMEOUT_SECONDS,
+    )
+    working_writer = CompactWorkingWriter(COMPACT_DIR, flush_every=COMPACT_FLUSH_EVERY)
+
+    train(
+        TASK,
+        policy,
+        seeds,
+        simulator_config,
+        iterations=ITERATIONS,
+        batch_size=BATCH_SIZE,
+        checkpoint_path=CHECKPOINT_PATH,
+        checkpoint_every=CHECKPOINT_EVERY,
+        progress_every=PROGRESS_EVERY,
+        rng=rng,
+        archive_path=ARCHIVE_PATH,
+        working_writer=working_writer,
+    )
+
+    print(f"Done: {policy.iteration} iteration(s) run. Final weights: {policy.weights}")
+    print(f"Checkpoint: {CHECKPOINT_PATH}")
+    print(f"Archive: {ARCHIVE_PATH}")
+    print(f"Compact working machines: {working_writer.path}")
+
+
+if __name__ == "__main__":
+    main()
