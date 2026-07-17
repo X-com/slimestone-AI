@@ -38,6 +38,11 @@ class SharedLinearPolicy:
     def sample(self, features: list[float], rng: random.Random) -> bool:
         return rng.random() < self.probability(features)
 
+    def greedy(self, features: list[float]) -> bool:
+        """Deterministic action - the policy's best guess, not a stochastic draw. Used for
+        evaluating/comparing a trained policy rather than for exploration during training."""
+        return self.probability(features) > 0.5
+
     def update(self, episodes: list[tuple[list[float], bool, float]]) -> None:
         """episodes: list of (features, action, reward). Applies one REINFORCE step per episode,
         using a running mean of all rewards ever seen as the baseline."""

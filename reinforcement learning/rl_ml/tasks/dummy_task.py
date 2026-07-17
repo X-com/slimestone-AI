@@ -3,8 +3,9 @@ simulator-backed reward) with the least logic possible, so the training base can
 correct before a real objective is layered on. Bias-only features mean the policy can only ever
 learn one global "does adding slime anywhere tend to work" rate - that's expected, not a bug.
 
-Meant to be replaced by rl_ml/tasks/slime_extension.py (see the plan's "Future task" section for
-the real objective this Task protocol was built for).
+Superseded by rl_ml/tasks/block_attachment.py as main_rl.py's default, but kept as a second Task
+implementation - e.g. for the "does swapping the task actually leave train_loop.py/policy.py
+untouched" check in the plan's verification section.
 """
 from __future__ import annotations
 
@@ -14,7 +15,8 @@ from typing import Any
 
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
 from genetic_ml.blocks import BLOCK_SLIME, make_state
-from genetic_ml.mutation import _FACING_OFFSETS
+
+from rl_ml.positions import candidate_positions as _candidate_positions
 
 Candidate = dict[str, Any]
 
@@ -23,17 +25,6 @@ Candidate = dict[str, Any]
 class DummyContext:
     machine: Candidate
     position: tuple[int, int, int]
-
-
-def _candidate_positions(machine: Candidate) -> list[tuple[int, int, int]]:
-    occupied = {(b["x"], b["y"], b["z"]) for b in machine["blocks"]}
-    positions: set[tuple[int, int, int]] = set()
-    for block in machine["blocks"]:
-        for dx, dy, dz in _FACING_OFFSETS:
-            pos = (block["x"] + dx, block["y"] + dy, block["z"] + dz)
-            if pos not in occupied:
-                positions.add(pos)
-    return sorted(positions)
 
 
 class DummyTask:

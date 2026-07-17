@@ -4,13 +4,14 @@ import random
 from pathlib import Path
 
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
+from genetic_ml.blocks import BLOCK_SLIME
 from genetic_ml.candidate_io import load_candidates_from_glob
 from genetic_ml.compact_working_writer import CompactWorkingWriter
 from genetic_ml.config import SimulatorRunConfig
 
 from rl_ml.policy import SharedLinearPolicy
 from rl_ml.task import Task
-from rl_ml.tasks.dummy_task import DummyTask
+from rl_ml.tasks.block_attachment import BlockAttachmentTask
 from rl_ml.train_loop import train
 
 # Edit these values in VS Code, then run this file.
@@ -31,17 +32,20 @@ COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
 # everything regardless of this value - it only controls how often mid-run writes happen.
 COMPACT_FLUSH_EVERY = 100
 
-# Which training objective to run - swap this for a different rl_ml/tasks/*.py implementation to
-# change what's being learned; nothing else in this file (or train_loop.py/policy.py) needs to
-# change when you do.
-TASK: Task = DummyTask()
+# Which training objective to run - swap this for a different rl_ml/tasks/*.py implementation, or
+# pass more candidate_block_ids to train one shared model across several block types, to change
+# what's being learned; nothing else in this file (or train_loop.py/policy.py) needs to change
+# when you do.
+TASK: Task = BlockAttachmentTask(candidate_block_ids=[BLOCK_SLIME])
 
 WORKER_COUNT = 4
 MAX_TICKS = 6000
 SIMULATION_TIMEOUT_SECONDS = 5.0
 
 BATCH_SIZE = 16
-ITERATIONS = 200
+# None runs continuously against data/working/'s engines until you stop it (Ctrl+C); set an int
+# (e.g. 200) to cap it for a quick local test run.
+ITERATIONS: int | None = None
 LEARNING_RATE = 0.1
 CHECKPOINT_EVERY = 20
 PROGRESS_EVERY = 10

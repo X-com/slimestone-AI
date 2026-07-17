@@ -16,6 +16,21 @@ def test_sample_is_deterministic_given_a_seeded_rng():
     assert result_a == result_b
 
 
+def test_greedy_is_deterministic_and_matches_probability_threshold():
+    policy = SharedLinearPolicy(feature_count=1, learning_rate=0.1, task_name="test")
+
+    policy.weights = [5.0]  # probability(features=[1.0]) is clearly > 0.5
+    assert policy.greedy([1.0]) is True
+
+    policy.weights = [-5.0]  # clearly < 0.5
+    assert policy.greedy([1.0]) is False
+
+    # unlike sample(), greedy() takes no rng and must be stable across repeated calls.
+    policy.weights = [0.3]
+    results = {policy.greedy([1.0]) for _ in range(5)}
+    assert len(results) == 1
+
+
 def test_update_moves_weights_toward_rewarded_actions():
     policy = SharedLinearPolicy(feature_count=1, learning_rate=0.5, task_name="test")
 
