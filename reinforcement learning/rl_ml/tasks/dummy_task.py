@@ -54,4 +54,7 @@ class DummyTask:
     def reward_of(self, action: bool, result: dict[str, Any] | None) -> float:
         if not action or result is None:
             return 0.0
-        return 1.0 if result.get("working") is True else -1.0
+        # validCycle (not the older working/cycles hash-based heuristic) is the simulator's
+        # ground-truth check that the machine settles and ends up an exact translated copy of
+        # its starting layout.
+        return 1.0 if result.get("validCycle") is True else -1.0

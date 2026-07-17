@@ -61,5 +61,5 @@ def test_reward_of_matches_the_incentive_compatible_table():
 
     assert task.reward_of(False, None) == 0.0
     assert task.reward_of(True, None) == 0.0
-    assert task.reward_of(True, {"working": True}) == 1.0
-    assert task.reward_of(True, {"working": False}) == -1.0
+    assert task.reward_of(True, {"validCycle": True}) == 1.0
+    assert task.reward_of(True, {"validCycle": False}) == -1.0

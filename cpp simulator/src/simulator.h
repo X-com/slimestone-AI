@@ -23,6 +23,10 @@ struct Result {
     int end = 0;
     int period = 0;
     BlockPos shift;
+    bool cycles = false;
+    bool settled = false;
+    bool validCycle = false;
+    BlockPos finalShift;
     std::int64_t elapsedNs = 0;
     std::string errorCode;
     std::string error;
@@ -94,6 +98,12 @@ private:
     // that use only redstone blocks as power sources.
     std::unordered_set<std::uint64_t> ncPowerSet_;
 
+    // Trigger pulse / burnout state (see Simulator::trigger).
+    BlockPos triggerPos_;
+    bool triggerCharged_ = false;
+    std::int64_t triggerEndTick_ = -1;
+    bool triggerDisabled_ = false;
+
     void loadCandidate(const Candidate& candidate);
     void trigger(BlockPos pos);
     void tickWorld();
@@ -137,6 +147,8 @@ private:
     bool hasMovingAt(BlockPos pos) const;
     bool isExtendingMovingAt(BlockPos pos, int facing) const;
     ShiftCycle* detectShiftCycle(int maxTicks, ShiftCycle& out);
+    bool isQuiescent() const;
+    bool compareFinalToInitial(const Candidate& candidate, BlockPos& outShift) const;
     StateKey stateKey(BlockPos& anchor) const;
     static bool samePos(BlockPos a, BlockPos b);
 };

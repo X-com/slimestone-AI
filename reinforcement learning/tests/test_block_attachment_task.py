@@ -90,8 +90,10 @@ def test_reward_of_matches_the_incentive_compatible_table():
 
     assert task.reward_of(False, None) == 0.0
     assert task.reward_of(True, None) == 0.0
-    assert task.reward_of(True, {"working": True}) == 1.0
-    assert task.reward_of(True, {"working": False}) == -1.0
+    assert task.reward_of(True, {"validCycle": True}) == 1.0
+    assert task.reward_of(True, {"validCycle": False}) == -1.0
+    # the older working/cycles field alone must not be enough - validCycle is the real signal.
+    assert task.reward_of(True, {"working": True, "validCycle": False}) == -1.0
 
 
 def test_default_candidate_block_ids_is_slime_only():

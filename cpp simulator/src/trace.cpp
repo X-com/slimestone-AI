@@ -53,6 +53,15 @@ void Trace::logState(const World& world, const char* tag, const BlockPos* pos, s
     out_ << '\n';
 }
 
+void Trace::logHash(const World& world, const char* tag, std::uint64_t a, std::uint64_t b, std::uint64_t c) {
+    if (!out_.is_open()) {
+        return;
+    }
+    writePrefix(world, tag, nullptr);
+    out_ << ' ' << a << ',' << b << ',' << c;
+    out_ << '\n';
+}
+
 void Trace::writePrefix(const World& world, const char* tag, const BlockPos* pos) {
     out_ << world.time << ' ' << tag << ' ';
     if (pos == nullptr) {

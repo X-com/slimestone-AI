@@ -49,7 +49,9 @@ def main() -> None:
     )
 
     ok = sum(1 for result in results if result.get("ok") is True)
-    working = sum(1 for result in results if result.get("working") is True)
+    # validCycle (not the older working/cycles hash-based heuristic) is the simulator's
+    # ground-truth check that a machine settles and ends up an exact translated copy of itself.
+    working = sum(1 for result in results if result.get("validCycle") is True)
     print(f"Wrote {len(results)} results to {OUTPUT_JSONL}")
     print(f"ok={ok} working={working}")
 

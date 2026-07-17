@@ -152,7 +152,10 @@ def run_ga(
                 total_simulated += len(results)
 
                 for (child, source_kind, source_hash, child_hash), result in zip(offspring, results, strict=True):
-                    working = result.get("working") is True
+                    # validCycle (not the older working/cycles hash-based heuristic) is the
+                    # simulator's ground-truth check: does the machine settle and end up an exact
+                    # translated copy of its starting layout, not just "a repeat was detected."
+                    working = result.get("validCycle") is True
                     if working:
                         lineage = Lineage(
                             candidate=child,

@@ -36,7 +36,7 @@ def test_rewards_align_with_contexts_regardless_of_which_actions_were_simulated(
         DummyContext(machine=_MACHINE, position=(2, 0, 0)),
     ]
     actions = [True, False]  # only the first gets simulated (build_candidate(False, ...) is None)
-    pool = _StubPool({1: {"working": True}})
+    pool = _StubPool({1: {"validCycle": True}})
 
     rewards = _simulate_rewards(
         task, contexts, actions, pool, itertools.count(1), archive=None, working_writer=None, generation=1
@@ -50,7 +50,7 @@ def test_a_failed_addition_is_never_archived_or_saved(tmp_path):
     contexts = [DummyContext(machine=_MACHINE, position=(1, 0, 0))]
     archive = Archive(tmp_path / "archive.jsonl")
     writer = CompactWorkingWriter(tmp_path / "compact")
-    pool = _StubPool({1: {"working": False}})
+    pool = _StubPool({1: {"validCycle": False}})
 
     rewards = _simulate_rewards(
         task, contexts, [True], pool, itertools.count(1), archive, writer, generation=1
@@ -69,10 +69,10 @@ def test_rediscovering_the_same_candidate_saves_to_working_writer_only_once(tmp_
     next_id = itertools.count(1)
 
     first = _simulate_rewards(
-        task, contexts, [True], _StubPool({1: {"working": True}}), next_id, archive, writer, generation=1
+        task, contexts, [True], _StubPool({1: {"validCycle": True}}), next_id, archive, writer, generation=1
     )
     second = _simulate_rewards(
-        task, contexts, [True], _StubPool({2: {"working": True}}), next_id, archive, writer, generation=2
+        task, contexts, [True], _StubPool({2: {"validCycle": True}}), next_id, archive, writer, generation=2
     )
 
     assert first == [1.0]
