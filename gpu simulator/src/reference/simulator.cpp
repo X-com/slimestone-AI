@@ -17,6 +17,9 @@ using namespace mcp1122;
 
 std::string Result::toJson() const {
     std::ostringstream out;
+    double ticksPerSecond = elapsedNs > 0
+        ? static_cast<double>(ticks) * 1000000000.0 / static_cast<double>(elapsedNs)
+        : 0.0;
     out << '{'
         << "\"id\":" << id
         << ",\"ok\":" << (ok ? "true" : "false")
@@ -28,7 +31,14 @@ std::string Result::toJson() const {
         << ",\"shift\":{\"x\":" << shift.x
         << ",\"y\":" << shift.y
         << ",\"z\":" << shift.z << '}'
-        << ",\"elapsedNs\":" << elapsedNs;
+        << ",\"cycles\":" << (cycles ? "true" : "false")
+        << ",\"settled\":" << (settled ? "true" : "false")
+        << ",\"validCycle\":" << (validCycle ? "true" : "false")
+        << ",\"finalShift\":{\"x\":" << finalShift.x
+        << ",\"y\":" << finalShift.y
+        << ",\"z\":" << finalShift.z << '}'
+        << ",\"elapsedNs\":" << elapsedNs
+        << ",\"ticksPerSecond\":" << ticksPerSecond;
     if (!ok) {
         out << ",\"errorCode\":\"" << mcp1122::quoteJson(errorCode) << '"'
             << ",\"error\":\"" << mcp1122::quoteJson(error) << '"';
@@ -67,6 +77,25 @@ Result Simulator::simulate(const mcp1122::Candidate& candidate) {
             result.end = found->end;
             result.period = found->period;
             result.shift = found->shift;
+            result.cycles = result.working;
+
+            if (result.working) {
+                // Cycle confirmed: the trigger has done its job and burns out - it stops
+                // reacting to neighbor changes and stops emitting piston events, but the
+                // block itself is left in place (still part of the structure's shape).
+                triggerDisabled_ = true;
+                watchSet_.erase(packPos(triggerPos_));
+
+                for (int tick = found->end; tick < maxTicks; ++tick) {
+                    tickWorld();
+                    if (isQuiescent()) {
+                        result.settled = true;
+                        break;
+                    }
+                }
+
+                result.validCycle = result.settled && compareFinalToInitial(candidate, result.finalShift);
+            }
         }
     } catch (const std::exception& error) {
         result.ok = false;
@@ -120,6 +149,10 @@ void Simulator::loadCandidate(const mcp1122::Candidate& candidate) {
     watchSet_.clear();
     observerSet_.clear();
     ncPowerSet_.clear();
+    triggerPos_ = BlockPos{0, 0, 0};
+    triggerCharged_ = false;
+    triggerEndTick_ = -1;
+    triggerDisabled_ = false;
 
     int minX = std::numeric_limits<int>::max();
     int minY = std::numeric_limits<int>::max();
@@ -180,10 +213,24 @@ void Simulator::loadCandidate(const mcp1122::Candidate& candidate) {
 
 void Simulator::trigger(BlockPos pos) {
     std::uint32_t state = world_.getBlock(pos);
-    if (blockId(state) == BLOCK_OBSERVER) {
-        scheduleUpdate(pos, BLOCK_OBSERVER, 2);
-    } else {
+    int id = blockId(state);
+    if (!isPistonBlock(id)) {
+        throw std::runtime_error("trigger must point at a piston or sticky piston");
+    }
+
+    triggerPos_ = pos;
+    if (shouldPistonBeExtended(pos, state)) {
+        // Already powered by the structure itself - no external kick needed.
         neighborChanged(pos, 95, pos);
+    } else {
+        // Cold start: emulate a brief external redstone pulse (2 game ticks, same duration
+        // as an observer's own pulse) to kick the piston into motion once. checkForMove sees
+        // shouldPistonBeExtended() == true for the trigger position while triggerCharged_ is
+        // set (see shouldPistonBeExtended below), then tickWorld() ends the pulse and lets the
+        // piston re-evaluate on real power alone.
+        triggerCharged_ = true;
+        triggerEndTick_ = world_.time + 2;
+        checkForMove(pos, state);
     }
 }
 
@@ -192,6 +239,16 @@ void Simulator::tickWorld() {
         trace_->log(world_.time, "h.tick", nullptr, 1, 0);
     }
     ++world_.time;
+    if (triggerCharged_ && world_.time >= triggerEndTick_) {
+        // Pulse over - re-check the trigger piston on real power alone; it retracts on its
+        // own here if nothing else in the structure is holding it extended.
+        triggerCharged_ = false;
+        std::uint32_t state = world_.getBlock(triggerPos_);
+        int id = blockId(state);
+        if (isPistonBlock(id)) {
+            checkForMove(triggerPos_, state);
+        }
+    }
     tickScheduledUpdates();
     sendQueuedBlockEvents();
     if (trace_ != nullptr) {
@@ -396,6 +453,10 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
             neighborChanged(base, sourceBlockId, fromPos);
         }
     } else if (id == BLOCK_PISTON || id == BLOCK_STICKY_PISTON) {
+        if (triggerDisabled_ && samePos(pos, triggerPos_)) {
+            // Burned-out trigger: stops receiving updates entirely.
+            return;
+        }
         if (trace_ != nullptr) {
             trace_->logState(world_.time, "p.nc", &pos, state);
             trace_->logBlock(world_.time, "p.src", &fromPos, sourceBlockId);
@@ -510,6 +571,9 @@ void Simulator::checkForMove(BlockPos pos, std::uint32_t state) {
 }
 
 bool Simulator::shouldPistonBeExtended(BlockPos pos, std::uint32_t state) const {
+    if (triggerCharged_ && samePos(pos, triggerPos_)) {
+        return true;
+    }
     const Facing& pistonFacing = facingByIndex(facingMeta(state));
     for (const Facing& facing : facings()) {
         if (facing.index != pistonFacing.index) {
@@ -732,6 +796,11 @@ bool Simulator::isSameRailWithPower(int railId, BlockPos pos, bool forward, int 
 }
 
 bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, int param) {
+    if (triggerDisabled_ && samePos(pos, triggerPos_)) {
+        // Burned-out trigger: produces no further output actions, even for events already
+        // queued in the same tick the cycle was detected.
+        return false;
+    }
     const Facing& facing = facingByIndex(facingMeta(state));
     if (trace_ != nullptr) {
         trace_->logBlock(world_.time, "p.ev", &pos, blockId(state), id, param);
@@ -826,6 +895,12 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
         BlockPos source = helper.moveAt(i);
         BlockPos target = offset(source, moveFacing);
         std::uint32_t movedState = movedStates[static_cast<std::size_t>(i)];
+        if (samePos(source, triggerPos_)) {
+            // The trigger piston is being carried along as part of the structure moving
+            // (pushed by a different piston) - its base physically relocates, so keep
+            // triggerPos_ pointing at the same real block rather than a stale coordinate.
+            triggerPos_ = target;
+        }
         setBlockState(source, 0, 2);
         setBlockState(target, setFacingMeta(makeState(BLOCK_PISTON_EXTENSION, 0), direction.index), 4);
         if (trace_ != nullptr) {
@@ -1019,6 +1094,71 @@ Simulator::ShiftCycle* Simulator::detectShiftCycle(int maxTicks, ShiftCycle& out
         }
     }
     return nullptr;
+}
+
+bool Simulator::isQuiescent() const {
+    if (!world_.scheduledTicks.empty()) return false;
+    for (const auto& queue : world_.blockEvents) {
+        if (!queue.empty()) return false;
+    }
+    for (const auto& bucket : world_.movingBuckets) {
+        if (!bucket.empty()) return false;
+    }
+    return true;
+}
+
+// Direct final-vs-initial block set comparison: finds the translation that lines up each
+// snapshot's anchor block (same ordering rule as stateKey's block-anchor), then requires every
+// original block to have an exact state match at pos+shift in the final snapshot with no extras
+// or omissions. This is the ground truth for "looks identical to the original, shifted N blocks" -
+// independent of the period/shift the cycle detector guessed from the state-key hash.
+bool Simulator::compareFinalToInitial(const mcp1122::Candidate& candidate, BlockPos& outShift) const {
+    BlockPos origAnchor{0, 0, 0};
+    bool haveOrig = false;
+    for (const mcp1122::BlockEntry& block : candidate.blocks) {
+        if (block.state == 0) continue;
+        BlockPos pos{block.x, block.y, block.z};
+        if (anchorBeats(pos, origAnchor, haveOrig)) {
+            origAnchor = pos;
+            haveOrig = true;
+        }
+    }
+
+    const auto& finalEntries = world_.entries();
+    BlockPos finalAnchor{0, 0, 0};
+    bool haveFinal = false;
+    for (const auto& entry : finalEntries) {
+        if (anchorBeats(entry.pos, finalAnchor, haveFinal)) {
+            finalAnchor = entry.pos;
+            haveFinal = true;
+        }
+    }
+
+    if (!haveOrig || !haveFinal) {
+        return false;
+    }
+
+    BlockPos shift{finalAnchor.x - origAnchor.x, finalAnchor.y - origAnchor.y, finalAnchor.z - origAnchor.z};
+
+    std::size_t origCount = 0;
+    for (const mcp1122::BlockEntry& block : candidate.blocks) {
+        if (block.state == 0) continue;
+        ++origCount;
+        BlockPos shiftedPos{block.x + shift.x, block.y + shift.y, block.z + shift.z};
+        // FixedWorld::getBlock() throws on an out-of-range position (unlike cpp extract's
+        // unbounded block map, which just returns 0/not-present) - a shift landing outside the
+        // fixed cube is "no match" here, same as cpp extract reading an unset position, not a
+        // whole-simulation error.
+        if (!world_.inRange(shiftedPos) || world_.getBlock(shiftedPos) != block.state) {
+            return false;
+        }
+    }
+    if (origCount != finalEntries.size()) {
+        return false;
+    }
+
+    outShift = shift;
+    return true;
 }
 
 StateKey Simulator::stateKey(BlockPos& anchor) const {

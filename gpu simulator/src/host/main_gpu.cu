@@ -34,7 +34,12 @@ std::string resultToJson(const GpuResult& r) {
         << ",\"end\":" << r.end
         << ",\"period\":" << r.period
         << ",\"shift\":{\"x\":" << r.shift.x << ",\"y\":" << r.shift.y << ",\"z\":" << r.shift.z << '}'
-        << ",\"elapsedNs\":" << 0;
+        << ",\"cycles\":" << (r.cycles ? "true" : "false")
+        << ",\"settled\":" << (r.settled ? "true" : "false")
+        << ",\"validCycle\":" << (r.validCycle ? "true" : "false")
+        << ",\"finalShift\":{\"x\":" << r.finalShift.x << ",\"y\":" << r.finalShift.y << ",\"z\":" << r.finalShift.z << '}'
+        << ",\"elapsedNs\":" << 0
+        << ",\"ticksPerSecond\":" << 0;
     if (!r.ok) {
         // Matches reference/'s single catch-all "simulation_error" - both the bounds check in
         // loadCandidate and any FixedWorld capacity ceiling report through the same code there
@@ -73,7 +78,9 @@ void processStream(std::istream& in, int maxTicks, int batchSize, int threadsPer
         } catch (const std::exception& error) {
             flush();
             std::cout << "{\"id\":-1,\"ok\":false,\"working\":false,\"ticks\":0,\"start\":0,\"end\":0,"
-                         "\"period\":0,\"shift\":{\"x\":0,\"y\":0,\"z\":0},\"elapsedNs\":0,"
+                         "\"period\":0,\"shift\":{\"x\":0,\"y\":0,\"z\":0},\"cycles\":false,"
+                         "\"settled\":false,\"validCycle\":false,\"finalShift\":{\"x\":0,\"y\":0,\"z\":0},"
+                         "\"elapsedNs\":0,\"ticksPerSecond\":0,"
                          "\"errorCode\":\"parse_error\",\"error\":\""
                       << mcp1122::quoteJson(error.what()) << "\"}\n";
             break;
