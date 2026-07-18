@@ -261,6 +261,9 @@ void Simulator::tickWorld() {
 }
 
 void Simulator::tickScheduledUpdates() {
+    if (world_.scheduledTicks.empty()) {
+        return;
+    }
     std::sort(world_.scheduledTicks.begin(), world_.scheduledTicks.end(),
         [](const ScheduledTick& a, const ScheduledTick& b) {
             if (a.time != b.time) return a.time < b.time;
@@ -270,12 +273,13 @@ void Simulator::tickScheduledUpdates() {
     auto partIt = std::partition_point(world_.scheduledTicks.begin(), world_.scheduledTicks.end(),
         [this](const ScheduledTick& t) { return t.time <= world_.time; });
 
-    std::vector<ScheduledTick> pendingDue(
+    pendingDue_.clear();
+    pendingDue_.insert(pendingDue_.end(),
         std::make_move_iterator(world_.scheduledTicks.begin()),
         std::make_move_iterator(partIt));
     world_.scheduledTicks.erase(world_.scheduledTicks.begin(), partIt);
 
-    for (const ScheduledTick& tick : pendingDue) {
+    for (const ScheduledTick& tick : pendingDue_) {
         std::uint32_t state = world_.getBlock(tick.pos);
         if (blockId(state) != tick.blockId) {
             continue;
@@ -319,9 +323,9 @@ void Simulator::sendQueuedBlockEvents() {
     while (!world_.blockEvents[static_cast<std::size_t>(world_.blockEventCacheIndex)].empty()) {
         int index = world_.blockEventCacheIndex;
         world_.blockEventCacheIndex ^= 1;
-        std::vector<BlockEvent> events;
-        events.swap(world_.blockEvents[static_cast<std::size_t>(index)]);
-        for (const BlockEvent& event : events) {
+        pendingBlockEvents_.clear();
+        pendingBlockEvents_.swap(world_.blockEvents[static_cast<std::size_t>(index)]);
+        for (const BlockEvent& event : pendingBlockEvents_) {
             fireBlockEvent(event);
         }
     }
@@ -353,11 +357,11 @@ void Simulator::updateEntities() {
         trace_->log(world_.time, "te.pendp", nullptr, 0, 0);
     }
 
-    std::vector<MovingBlock> done;
-    done.swap(world_.movingBuckets[static_cast<std::size_t>(oldest)]);
+    pendingDoneMoving_.clear();
+    pendingDoneMoving_.swap(world_.movingBuckets[static_cast<std::size_t>(oldest)]);
     world_.movingPtr = ((world_.movingPtr + 1) % 3 + 3) % 3;
 
-    for (const MovingBlock& moving : done) {
+    for (const MovingBlock& moving : pendingDoneMoving_) {
         if (trace) {
             trace_->logState(world_.time, "te.p", &moving.pos, moving.pistonState, 100, 100);
         }

@@ -83,6 +83,14 @@ private:
     PosKeySet observerSet_;
     PosKeySet ncPowerSet_;
 
+    // Reused scratch buffers for draining scheduledTicks/blockEvents[idx]/movingBuckets[idx]
+    // each tick without swapping capacity out to a fresh local (which would free it on scope
+    // exit and force a realloc on the container's next use, every few ticks, for any candidate
+    // with ongoing piston/event activity) - mirrors cpp extract's pendingDue_ pattern.
+    std::vector<ScheduledTick> pendingDue_;
+    std::vector<BlockEvent> pendingBlockEvents_;
+    std::vector<MovingBlock> pendingDoneMoving_;
+
     // Trigger pulse / burnout state (see Simulator::trigger).
     BlockPos triggerPos_;
     bool triggerCharged_ = false;
