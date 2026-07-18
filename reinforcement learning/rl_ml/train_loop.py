@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
+from genetic_ml.compact_format import encode_candidate
 from genetic_ml.config import SimulatorRunConfig
 from genetic_ml.hash_log import HashLog
 from genetic_ml.population import canonical_hash
@@ -31,6 +32,7 @@ def _simulate_rewards(
     working_writer: Any,
     working_hashes: HashLog | None = None,
     not_working_hashes: HashLog | None = None,
+    stream_hub: Any = None,
 ) -> list[float]:
     """Builds candidates for every action, runs them through pool.run_all() in one batch, and
     returns one reward per context (in context order). A newly-discovered distinct working
@@ -39,6 +41,11 @@ def _simulate_rewards(
     more than the hash. Shared between train() and evaluate.py so both go through identical
     simulate/reward/hash-log wiring - only what happens *before* this (how actions are chosen)
     differs between them.
+
+    stream_hub: anything with a publish(frame: bytes) method - e.g. genetic_ml.stream_hub.
+    StreamHub. Optional; None skips this. Every newly-discovered working candidate from this call
+    is encoded and published as a single batch frame, so a connected /live dashboard sees the
+    same discoveries working_writer just persisted.
 
     working_hashes/not_working_hashes, if given, are checked before simulating each candidate: a
     shape whose canonical hash was already tried (in this run or an earlier one) skips the
@@ -66,16 +73,22 @@ def _simulate_rewards(
     rewards = [task.reward_of(actions[i], None) for i in range(len(contexts))]
     for i, reward in cache_hit_rewards.items():
         rewards[i] = reward
+    new_working: list[Candidate] = []
     for (i, candidate, candidate_hash), result in zip(to_simulate, results):
         rewards[i] = task.reward_of(actions[i], result)
         working = result.get("validCycle") is True
         if working:
             if working_hashes is not None:
                 newly_discovered = working_hashes.record(candidate_hash)
-                if newly_discovered and working_writer is not None:
-                    working_writer.save(candidate)
+                if newly_discovered:
+                    if working_writer is not None:
+                        working_writer.save(candidate)
+                    new_working.append(candidate)
         elif not_working_hashes is not None:
             not_working_hashes.record(candidate_hash)
+
+    if stream_hub is not None and new_working:
+        stream_hub.publish(b"".join(encode_candidate(c) for c in new_working))
 
     return rewards
 
@@ -95,12 +108,16 @@ def train(
     working_hashes_path: str | Path | None = None,
     not_working_hashes_path: str | Path | None = None,
     flush_interval_seconds: float = 1.0,
+    stream_hub: Any = None,
 ) -> SharedLinearPolicy:
     """working_writer: anything with a save(candidate) -> Path method and a flush() method - e.g.
     genetic_ml.compact_working_writer.CompactWorkingWriter - called once per newly-discovered
     distinct working candidate (not every time it's resampled). Optional; None skips this output
     - it's the only place the full candidate is persisted, the hash logs below never store more
     than the hash.
+
+    stream_hub: forwarded straight to _simulate_rewards() - see its docstring. Optional; None
+    skips live streaming entirely.
 
     working_hashes_path/not_working_hashes_path, if given, enable genetic_ml.hash_log.HashLog: a
     compact, hash-only record (not the full candidate/result) of every simulated shape.
@@ -148,7 +165,8 @@ def train(
                 actions = [policy.sample(f, rng) for f in feats]
 
                 rewards = _simulate_rewards(
-                    task, contexts, actions, pool, next_id, working_writer, working_hashes, not_working_hashes
+                    task, contexts, actions, pool, next_id, working_writer, working_hashes, not_working_hashes,
+                    stream_hub,
                 )
 
                 for action, reward in zip(actions, rewards):

@@ -19,7 +19,7 @@ FLYERS_FILE = PROJECT_ROOT.parent / "flying machines" / "compact" / "flyers.data
 CPP_EXE = REPO_ROOT / "cpp simulator" / "build" / "cpp_simulator_stream.exe"
 GPU_EXE = REPO_ROOT / "gpu simulator" / "build" / "gpu_kernel_stream.exe"
 
-WORKER_COUNT = 16  # number of parallel cpp extract worker processes
+WORKER_COUNT = 4  # number of parallel cpp extract worker processes
 MAX_TICKS = 6000
 
 

@@ -7,7 +7,9 @@ import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the i
 from genetic_ml.blocks import BLOCK_SLIME
 from genetic_ml.candidate_io import load_candidates_from_glob
 from genetic_ml.compact_working_writer import CompactWorkingWriter
-from genetic_ml.config import SimulatorRunConfig
+from genetic_ml.config import SimulatorRunConfig, simulator_exe_name
+from genetic_ml.dev_tls import build_ssl_context
+from genetic_ml.stream_hub import StreamHub
 
 from rl_ml.policy import SharedLinearPolicy
 from rl_ml.task import Task
@@ -20,7 +22,7 @@ SIMULATOR_EXE = (
     PROJECT_ROOT.parent
     / "cpp simulator"
     / "build"
-    / "cpp_simulator_stream.exe"
+    / simulator_exe_name()
 )
 
 WORKING_DIR = PROJECT_ROOT / "data" / "working"
@@ -35,6 +37,15 @@ CHECKPOINT_PATH = PROJECT_ROOT / "data" / "checkpoints" / "latest.json"
 WORKING_HASHES = PROJECT_ROOT / "data" / "outputs" / "working_hashes.log"
 NOT_WORKING_HASHES = PROJECT_ROOT / "data" / "outputs" / "not_working_hashes.log"
 COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
+# WS server the flyer-web-visualizer's Live Training page connects to (see
+# flyer-web-visualizer/docs/training-integration.md) - matches the frontend's default URL, so no
+# visualizer-side config is needed.
+STREAM_HOST = "localhost"
+STREAM_PORT = 8765
+# True serves wss:// with an auto-generated local TLS cert (see genetic_ml/dev_tls.py) - matches
+# the frontend's default wss://localhost:8765. False serves plain ws:// (edit the frontend's URL
+# box to match if you flip this).
+STREAM_TLS = True
 # How often CompactWorkingWriter/HashLog write their buffered records to disk in one batch, in
 # seconds. A graceful exit (Ctrl+C or normal completion) always flushes everything regardless of
 # this value - it only controls how often mid-run writes happen.
@@ -96,6 +107,11 @@ def main() -> None:
     )
     working_writer = CompactWorkingWriter(COMPACT_DIR, flush_interval_seconds=FLUSH_INTERVAL_SECONDS)
 
+    backlog = working_writer.path.read_bytes() if working_writer.path.exists() else b""
+    ssl_context = build_ssl_context() if STREAM_TLS else None
+    stream_hub = StreamHub(backlog=backlog, host=STREAM_HOST, port=STREAM_PORT, ssl_context=ssl_context)
+    stream_hub.start()
+
     train(
         TASK,
         policy,
@@ -111,6 +127,7 @@ def main() -> None:
         working_hashes_path=str(WORKING_HASHES),
         not_working_hashes_path=str(NOT_WORKING_HASHES),
         flush_interval_seconds=FLUSH_INTERVAL_SECONDS,
+        stream_hub=stream_hub,
     )
 
     print(f"Done: {policy.iteration} iteration(s) run. Final weights: {policy.weights}")

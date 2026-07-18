@@ -1,3 +1,5 @@
 genetic algorithm/data/
+data/dev-certs/
 **/__pycache__
 **/build
+**/.venv

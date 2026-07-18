@@ -6,7 +6,7 @@ from pathlib import Path
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
 from genetic_ml.blocks import BLOCK_SLIME
 from genetic_ml.candidate_io import load_candidates_from_glob
-from genetic_ml.config import SimulatorRunConfig
+from genetic_ml.config import SimulatorRunConfig, simulator_exe_name
 
 from rl_ml.evaluate import evaluate
 from rl_ml.policy import SharedLinearPolicy
@@ -19,7 +19,7 @@ SIMULATOR_EXE = (
     PROJECT_ROOT.parent
     / "cpp simulator"
     / "build"
-    / "cpp_simulator_stream.exe"
+    / simulator_exe_name()
 )
 
 WORKING_DIR = PROJECT_ROOT / "data" / "working"

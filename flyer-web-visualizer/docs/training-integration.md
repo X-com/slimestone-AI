@@ -123,3 +123,127 @@ dashboard shows at the top; the bottom pager keeps the full history.
   point; everything async happens on the hub's own thread.
 - **RL vs GA.** The loop here is a GA, but the contract is identical for an RL trainer: encode each
   emitted machine's candidate and `publish` it.
+
+## Serving over HTTPS (`wss://`)
+
+The frontend connects to `wss://localhost:8765` by default, so `StreamHub` needs to terminate TLS.
+This is fully automatic — `genetic_ml/dev_tls.py`'s `build_ssl_context()` generates a local
+certificate on first use and reuses it after that; nobody has to hand-run mkcert/openssl commands:
+
+```python
+from genetic_ml.dev_tls import build_ssl_context
+
+ssl_context = build_ssl_context()  # generates data/dev-certs/ on first call, reuses it after
+hub = StreamHub(backlog=backlog, ssl_context=ssl_context)
+```
+
+`StreamHub` just forwards `ssl_context` to `serve(..., ssl=ssl_context)` and prints `wss://` instead
+of `ws://` once it's serving. `main_rl.py`/`main_ga.py` both do this behind a `STREAM_TLS = True`
+constant (flip it to `False`, and change the frontend's URL box back to `ws://`, to skip TLS).
+`scripts/stream_flyers.py` does the same by default (`--no-tls` to opt out), but through its own
+**self-contained** `scripts/dev_tls.py` (same mkcert→openssl logic, cert in `.certs/` next to the
+script) rather than importing `genetic_ml` — `scripts/` gets copied between repos on its own (see
+"Keeping the two repos in sync" below) where a `genetic algorithm` sibling may not exist or may be
+a stale mirror, so this script can't assume it's reachable.
+
+**Why `wss://`, not `ws://`, is required at all — mixed content.** This is *not* CORS (WebSockets
+don't do a CORS preflight); it's simpler than that: a page served over `https://` is not allowed to
+open an insecure `ws://` socket — the browser blocks it outright, no warning to click through, just
+a hard block. Once the frontend itself is served over HTTPS (any real deploy, including Vercel), the
+stream endpoint must be `wss://` too. Serving over plain `http://` locally never hits this, which is
+exactly why a local `ws://` setup can *look* like it works before this matters.
+
+**How the cert gets made** (`ensure_dev_cert`, tried in this order, first success wins):
+
+1. **[mkcert](https://github.com/FiloSottile/mkcert)**, if it's on `PATH` — runs `mkcert -install`
+   (idempotent, safe to call every time) then generates a `localhost`/`127.0.0.1`/`::1` cert signed
+   by mkcert's local CA. Every browser on the machine trusts it immediately, zero warnings.
+2. **`openssl`**, if mkcert isn't available — one `openssl req -x509 -newkey rsa:2048 ...` call
+   generates a self-signed cert with the same SAN entries. Works with no extra installs (present on
+   effectively every Linux/macOS box, and on Windows if Git for Windows is installed), but needs the
+   one-time manual trust step below.
+3. **Neither found** → raises `RuntimeError` with the install instructions above, instead of
+   silently falling back to plaintext `ws://`.
+
+The generated cert/key live in `<repo root>/data/dev-certs/` (gitignored — the key must never be
+committed) and are reused across runs and across GA/RL/`stream_flyers.py`, so cert generation only
+ever happens once per machine.
+
+### The one manual step a self-signed cert still needs
+
+A browser shows its "accept this certificate" interstitial only for a top-level page **navigation**
+(typing/opening a URL) — never for a `wss://` `WebSocket` connection made from a script. So with a
+self-signed cert (the openssl fallback path), `new WebSocket('wss://localhost:8765')` just fails
+with a bare, detail-free error in devtools (`WebSocket connection to 'wss://...' failed:`) and
+nothing reaches the server, even though the server is up and listening — there is no exception to
+click through from the WebSocket call itself.
+
+Fix it once per browser/profile: open `https://localhost:8765/` directly in a new tab, click through
+the "connection is not private" warning, then reload the visualizer page and hit Connect — the
+`wss://` connection now succeeds, since the browser remembers the trust exception for that origin.
+Both `StreamHub` and `stream_flyers.py` print this reminder (`dev_tls.tls_hint()`) right after they
+start serving over TLS, and the dashboard's own "Connection failed" message links to the same URL
+when it detects a `wss://` target. Installing mkcert avoids this step entirely (its cert is already
+trusted, so there's no warning to click through in the first place).
+
+Once trust is granted, visiting `https://localhost:8765/` directly will show a plain-text error like
+`Failed to open a WebSocket connection: invalid Connection header ... You cannot access a WebSocket
+server directly with a browser.` — **that response is expected and is actually the success signal**:
+it means the TLS handshake completed and the browser now trusts the cert (a browser sending a normal
+page-load GET, with no `Upgrade: websocket` header, always gets this from a WebSocket-only server —
+it isn't a bug to fix). If instead the tab shows a certificate error, trust wasn't granted yet.
+
+### The hosted-site-specific blocker: Chrome/Edge 147+ Local Network Access
+
+A page connecting fine from `http://localhost:5173` (local dev) but failing from the **deployed**
+site is not necessarily just a stale build. Chromium browsers (Chrome, Edge, Brave, Opera) shipped a
+**Local Network Access** permission gate in Chrome 142 (Oct 2025) for `fetch`/XHR, and **extended it
+to WebSocket/WebTransport in Chrome 147** (Apr 2026): a page loaded from a **public** origin (e.g.
+`https://your-app.vercel.app`) opening a socket to a **private** address (`localhost`, `127.0.0.1`,
+`::1`, or any RFC1918 address) now requires the user to grant a one-time permission — the browser
+shows *"`<site>` wants to connect to devices on your local network"* the first time it happens.
+
+- A page served from `localhost` connecting to `wss://localhost:8765` is **private → private** and
+  is never gated — this is exactly why local dev "just works" and gives no signal about the hosted
+  path.
+- The prompt requires the *requesting* page to itself be a secure context (served over `https://`,
+  which every real deploy is) — otherwise Chrome fails the connection **silently, with no prompt and
+  no way to allow it**.
+- The grant/deny decision is remembered per-origin. If it was ever dismissed or denied, every later
+  attempt from that origin fails until it's reset via the address bar's lock/info icon → **Site
+  settings → Local network access → Allow**, then reload.
+- Firefox and Safari don't enforce this (yet) — useful for isolating whether this is the blocker.
+
+This is a deliberate browser security boundary (stops arbitrary public sites from silently probing a
+visitor's home network), not a bug in this app, and there is no server-side response that grants it
+automatically — TLS being correct is necessary but not sufficient for a *hosted* page. The dashboard
+itself surfaces a hint for this case (`targetsPrivateHost && pageIsPublicOrigin` in
+`TrainingDashboard.svelte`) alongside the self-signed-cert hint.
+
+If the actual goal is letting a hosted page watch a *remote* training run (not the viewer's own
+machine), don't point it at `localhost` at all — that's what the tunnel/reverse-proxy option below is
+for; a real public `wss://` hostname isn't a "local network address" and isn't gated by this at all.
+
+### Alternative: skip the app-level cert entirely with a reverse proxy / tunnel
+
+No code change needed: put a TLS terminator in front of the plain `ws://localhost:8765` server. e.g.
+[Caddy](https://caddyserver.com/) (`reverse_proxy localhost:8765`, automatic HTTPS) run locally, or a
+tunnel like `cloudflared`/`ngrok` that hands you a **public** `wss://…` URL to paste into the
+dashboard's URL box. This is also the right answer for genuinely remote training (a real host+tunnel
+address instead of `localhost`), and it sidesteps Local Network Access entirely, since the target is
+no longer a private address from the browser's point of view.
+
+- **CSP.** Only relevant if whatever hosts the built frontend sets a `Content-Security-Policy` —
+  then `connect-src` must include the `wss://` endpoint. The app itself sets none.
+- **Origin.** `websockets.serve` accepts all origins by default, so this isn't a blocker unless
+  someone adds origin validation later.
+
+## Keeping the two repos in sync
+
+The frontend (`flyer-web-visualizer/`) is developed in two checkouts: this monorepo (where it's
+wired to the real GA/RL backend for local integration work) and a standalone repo that Vercel
+actually deploys from. Editing only this copy never reaches production. When changing anything under
+`flyer-web-visualizer/` (`src/`, `scripts/`, `docs/`), mirror the same files into the other checkout
+and commit/push there too — that's the repo with the Vercel hook. `scripts/stream_flyers.py` is
+written to be copy-safe (self-contained `scripts/dev_tls.py`, no assumption about which name or
+layout the backend sibling directory uses), specifically so this sync doesn't silently break it.

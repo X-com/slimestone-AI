@@ -17,7 +17,7 @@
   let page = $state(0) // bottom page index, anchored from the OLDEST machine
   let batches = $state(0) // batches received this session (also the per-batch hash namespace)
 
-  let url = $state('ws://localhost:8765')
+  let url = $state('wss://localhost:8765')
   let status = $state<'idle' | 'connecting' | 'connected' | 'closed' | 'error'>('idle')
   let ws: WebSocket | null = null
 
@@ -178,6 +178,22 @@
           ? 'bg-red-500 text-white'
           : 'bg-slate-700 text-slate-300',
   )
+
+  // A browser never shows the "accept this certificate" prompt for a wss:// WebSocket the way it
+  // does for a plain https:// page load - a self-signed dev cert has to be trusted by visiting
+  // this https:// equivalent directly at least once first, or every wss:// connect just fails
+  // silently (no detail in the error event).
+  const httpsEquivalent = $derived(url.replace(/^wss:\/\//, 'https://'))
+
+  // Chrome/Edge/Brave/Opera 147+ gate any request from a public page to a private-network
+  // address (localhost/127.0.0.1/::1/RFC1918) behind a "wants to connect to devices on your
+  // local network" permission prompt - remembered per-origin, but silently blocks every attempt
+  // until granted (or re-granted, if a prior attempt was dismissed/blocked). This only fires
+  // when *this* page's own origin is itself public, so it never affects a page served from
+  // localhost.
+  const targetsPrivateHost = $derived(/^wss?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)(:|\/|$)/i.test(url))
+  const pageIsPublicOrigin =
+    typeof location !== 'undefined' && !/^(localhost|127\.0\.0\.1|\[?::1\]?)$/i.test(location.hostname)
 </script>
 
 <div class="absolute inset-0 flex flex-col text-slate-200">
@@ -251,11 +267,33 @@
     </span>
     {#if status === 'idle' || (status !== 'connected' && !machines.length)}
       <div
-        class="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-slate-500"
+        class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 text-center text-sm text-slate-500"
       >
-        {status === 'error'
-          ? 'Connection failed — is the stream server running?'
-          : 'Connect to a training stream to see live machines.'}
+        {#if status === 'error'}
+          <span>Connection failed — is the stream server running?</span>
+          {#if url.startsWith('wss://')}
+            <span class="max-w-md text-xs">
+              Self-signed dev cert? Open
+              <a
+                class="pointer-events-auto text-cyan-400 underline"
+                href={httpsEquivalent}
+                target="_blank"
+                rel="noopener">{httpsEquivalent}</a
+              >
+              once, accept the warning, then Connect again.
+            </span>
+          {/if}
+          {#if targetsPrivateHost && pageIsPublicOrigin}
+            <span class="max-w-md text-xs">
+              Viewing a hosted page? Chrome/Edge 147+ block a public page from reaching your local
+              network unless you approve it — look for a "wants to connect to devices on your
+              local network" prompt, or the address bar's lock icon → Site settings → Local
+              network access.
+            </span>
+          {/if}
+        {:else}
+          <span>Connect to a training stream to see live machines.</span>
+        {/if}
       </div>
     {/if}
   </div>

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from genetic_ml.compact_format import encode_candidate
 from genetic_ml.config import SimulatorRunConfig
 from genetic_ml.failure_log import FailureLogger
 from genetic_ml.hash_log import HashLog
@@ -84,6 +85,7 @@ def run_ga(
     flush_interval_seconds: float = 1.0,
     crash_dir: str | None = None,
     hang_dir: str | None = None,
+    stream_hub: Any = None,
 ) -> GAResult:
     """pool lets a caller supply an already-constructed SimulatorPool (or subclass) instead of
     having run_ga build a plain one. Defaults to None, which preserves the exact previous
@@ -109,6 +111,12 @@ def run_ga(
     downstream reward signals). not_working_hashes_path (defaults to "not_working_hashes.log" next
     to working_hashes_path) truncates to 8 bytes, since that side is the volume problem and a rare
     false positive there only ever costs a missed opportunity, not a wrong answer.
+
+    stream_hub: anything with a publish(frame: bytes) method - e.g. genetic_ml.stream_hub.
+    StreamHub. Optional; None skips this. Every newly-discovered working candidate found in a
+    generation is encoded and published as a single batch frame once that generation's
+    postprocessing finishes, so a connected flyer-web-visualizer /live dashboard sees the same
+    discoveries resolved_working_writer just persisted.
 
     flush_interval_seconds is passed to both HashLogs: each buffers new records in memory and
     writes them to disk in one batch at most once per this many seconds, rather than opening/
@@ -202,6 +210,7 @@ def run_ga(
                 total_simulated += len(results)
                 simulated_this_window += len(results)
 
+                new_working: list[Candidate] = []
                 with _timed(section_seconds, "postprocess"):
                     for (child, source_kind, source_hash, child_hash), result in zip(offspring, results, strict=True):
                         # validCycle (not the older working/cycles hash-based heuristic) is the
@@ -222,6 +231,7 @@ def run_ga(
                                 discoveries_this_run += 1
                                 if resolved_working_writer is not None:
                                     resolved_working_writer.save(child)
+                                new_working.append(child)
                         else:
                             not_working_hashes.record(child_hash)
                             if (
@@ -232,6 +242,9 @@ def run_ga(
 
                     for lineage in population.lineages:
                         lineage.stale_generations += 1
+
+                if stream_hub is not None and new_working:
+                    stream_hub.publish(b"".join(encode_candidate(c) for c in new_working))
 
                 now = time.monotonic()
                 if now - last_printed >= ga_config.progress_interval_seconds:

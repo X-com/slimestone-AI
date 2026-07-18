@@ -16,9 +16,17 @@ from pathlib import Path
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
+from dev_tls import build_ssl_context, tls_hint
+
 _HEADER = struct.Struct("<iiiiI")  # id, trigger_x, trigger_y, trigger_z, block_count -> 20 bytes
 _BLOCK_SIZE = 16  # <iiiI> per block
-_DEFAULT_FILE = Path(__file__).resolve().parents[2] / "genetic-ml/data/compact-working/flyers.data"
+# The backend sibling directory is named "genetic-ml" in some checkouts and "genetic algorithm"
+# in others (they've diverged) - try both, falling back to the first if neither exists yet.
+_CANDIDATE_FILES = [
+    Path(__file__).resolve().parents[2] / "genetic-ml/data/compact-working/flyers.data",
+    Path(__file__).resolve().parents[2] / "genetic algorithm/data/compact-working/flyers.data",
+]
+_DEFAULT_FILE = next((p for p in _CANDIDATE_FILES if p.exists()), _CANDIDATE_FILES[0])
 
 
 def split_records(buf: bytes) -> list[bytes]:
@@ -66,6 +74,9 @@ async def main() -> None:
     ap.add_argument("--batch", type=int, default=100, help="records per live batch")
     ap.add_argument("--interval", type=float, default=30.0, help="seconds between batches")
     ap.add_argument("--initial", type=int, default=None, help="initial records (default: half)")
+    ap.add_argument(
+        "--no-tls", action="store_true", help="serve plain ws:// instead of wss:// (default: TLS on)"
+    )
     args = ap.parse_args()
 
     raw = args.file.read_bytes()
@@ -78,13 +89,18 @@ async def main() -> None:
         f"{args.file} -> {len(records)} records ({len(raw)} bytes); "
         f"initial {initial}, then +{args.batch} every {args.interval:g}s"
     )
+    ssl_context = None if args.no_tls else build_ssl_context()
     async with serve(
         lambda ws: stream(ws, records, initial, args.batch, args.interval),
         args.host,
         args.port,
         max_size=None,
+        ssl=ssl_context,
     ):
-        print(f"streaming on ws://{args.host}:{args.port}  (Ctrl-C to stop)")
+        scheme = "ws" if ssl_context is None else "wss"
+        print(f"streaming on {scheme}://{args.host}:{args.port}  (Ctrl-C to stop)")
+        if ssl_context is not None:
+            print(tls_hint(args.host, args.port))
         await asyncio.Future()  # run forever
 
 

@@ -5,8 +5,10 @@ from pathlib import Path
 from genetic_ml.candidate_io import load_candidates_from_glob
 from genetic_ml.compact_format import read_compact_file
 from genetic_ml.compact_working_writer import CompactWorkingWriter
-from genetic_ml.config import SimulatorRunConfig
+from genetic_ml.config import SimulatorRunConfig, simulator_exe_name
+from genetic_ml.dev_tls import build_ssl_context
 from genetic_ml.ga_loop import GAConfig, run_ga
+from genetic_ml.stream_hub import StreamHub
 from genetic_ml.working_folder import WorkingFolderWriter
 
 # Edit these values in VS Code, then run this file.
@@ -15,7 +17,7 @@ SIMULATOR_EXE = (
     PROJECT_ROOT.parent
     / "cpp simulator"
     / "build"
-    / "cpp_simulator_stream.exe"
+    / simulator_exe_name()
 )
 
 # Every file in here is one verified-working flying machine (id/trigger/blocks), used only as
@@ -33,6 +35,15 @@ WORKING_STORAGE_FORMAT = "compact"  # "json" or "compact"
 # appended, e.g. discovered_0001.json, discovered_0002.json, ...
 DISCOVERED_NAME_PREFIX = "discovered"
 COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
+# WS server the flyer-web-visualizer's Live Training page connects to (see
+# flyer-web-visualizer/docs/training-integration.md) - matches the frontend's default URL, so no
+# visualizer-side config is needed.
+STREAM_HOST = "localhost"
+STREAM_PORT = 8765
+# True serves wss:// with an auto-generated local TLS cert (see genetic_ml/dev_tls.py) - matches
+# the frontend's default wss://localhost:8765. False serves plain ws:// (edit the frontend's URL
+# box to match if you flip this).
+STREAM_TLS = True
 
 # How often buffered records get written to disk in one batch, in seconds - applies to both
 # hash logs and, in "compact" mode, flyers.data (see genetic_ml/hash_log.py,
@@ -114,6 +125,12 @@ def main() -> None:
         working_writer = WorkingFolderWriter(WORKING_DIR, DISCOVERED_NAME_PREFIX)
         working_output_desc = WORKING_DIR
 
+    compact_file = COMPACT_DIR / "flyers.data"
+    backlog = compact_file.read_bytes() if compact_file.exists() else b""
+    ssl_context = build_ssl_context() if STREAM_TLS else None
+    stream_hub = StreamHub(backlog=backlog, host=STREAM_HOST, port=STREAM_PORT, ssl_context=ssl_context)
+    stream_hub.start()
+
     result = run_ga(
         simulator_config,
         ga_config,
@@ -124,6 +141,7 @@ def main() -> None:
         flush_interval_seconds=FLUSH_INTERVAL_SECONDS,
         crash_dir=str(CRASH_DIR),
         hang_dir=str(HANGS_DIR),
+        stream_hub=stream_hub,
     )
 
     print(

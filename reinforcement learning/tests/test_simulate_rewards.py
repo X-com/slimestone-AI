@@ -4,7 +4,7 @@ import itertools
 import time
 
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
-from genetic_ml.compact_format import read_compact_file
+from genetic_ml.compact_format import encode_candidate, read_compact_file
 from genetic_ml.compact_working_writer import CompactWorkingWriter
 from genetic_ml.hash_log import HashLog
 from genetic_ml.population import canonical_hash
@@ -41,6 +41,17 @@ class _StubPool:
 
     def run_all(self, candidates: list[dict]) -> list[dict]:
         return [self.results_by_candidate_id[candidate["id"]] for candidate in candidates]
+
+
+class _StubHub:
+    """Fakes genetic_ml.stream_hub.StreamHub's publish(frame) - _simulate_rewards only ever
+    calls that one method."""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+
+    def publish(self, frame: bytes) -> None:
+        self.frames.append(frame)
 
 
 class _ExplodingPool:
@@ -161,3 +172,40 @@ def test_not_working_cache_hit_skips_resimulation_and_recovers_the_same_reward()
     )
 
     assert rewards == [-1.0]  # same reward task.reward_of(True, {"validCycle": False}) would give
+
+
+def test_a_newly_discovered_working_candidate_is_published_as_one_frame():
+    task = DummyTask()
+    context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
+    hub = _StubHub()
+    pool = _StubPool({1: {"validCycle": True}})
+
+    _simulate_rewards(
+        task, [context], [True], pool, itertools.count(1), working_writer=None,
+        working_hashes=_bare_hash_log(hash_bytes=32), stream_hub=hub,
+    )
+
+    candidate = task.build_candidate(context, True, candidate_id=1)
+    assert hub.frames == [encode_candidate(candidate)]
+
+
+def test_failed_and_cache_hit_candidates_never_publish():
+    task = DummyTask()
+    context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
+    hub = _StubHub()
+
+    _simulate_rewards(
+        task, [context], [True], _StubPool({1: {"validCycle": False}}), itertools.count(1),
+        working_writer=None, stream_hub=hub,
+    )
+    assert hub.frames == []
+
+    candidate = task.build_candidate(context, True, candidate_id=1)
+    working_hashes = _bare_hash_log(hash_bytes=32)
+    working_hashes._seen = {bytes.fromhex(canonical_hash(candidate))}
+
+    _simulate_rewards(
+        task, [context], [True], _ExplodingPool(), itertools.count(1), working_writer=None,
+        working_hashes=working_hashes, stream_hub=hub,
+    )
+    assert hub.frames == []

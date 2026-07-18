@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def simulator_exe_name(base: str = "cpp_simulator_stream") -> str:
+    """Platform-correct simulator executable filename - build-cpp.sh/build-cpp.bat both name it
+    `base` on Linux/macOS and `base.exe` on Windows; every main*.py's SIMULATOR_EXE should build
+    its path through this instead of hardcoding the extension."""
+    return base + ".exe" if platform.system() == "Windows" else base
 
 
 @dataclass(frozen=True)
