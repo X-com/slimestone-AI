@@ -82,6 +82,12 @@ private:
     World world_;
     Trace* trace_ = nullptr;
     std::vector<World::ScheduledTick> pendingDue_;
+    // Reused scratch buffers for draining world_.blockEvents[idx] / movingBuckets[idx] each
+    // tick without swapping capacity out to a fresh local (which would free it on scope exit
+    // and force a realloc on the bucket's next use, every few ticks, for any candidate with
+    // ongoing piston/event activity).
+    std::vector<World::BlockEvent> pendingBlockEvents_;
+    std::vector<World::MovingBlock> pendingDoneMoving_;
     mutable BlockHashCache bhc_;
     // Positions of blocks that react to neighborChanged (pistons, piston heads, fence gates).
     // Maintained in setBlockState() so neighborChanged() can skip the main hash table lookup

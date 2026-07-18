@@ -160,6 +160,9 @@ void Simulator::tickWorld() {
 
 void Simulator::tickScheduledUpdates() {
     PROF_SCOPE("tickScheduledUpdates");
+    if (world_.scheduledTicks.empty()) {
+        return;
+    }
     // order is unique (monotonically increasing) so std::sort equals stable_sort here
     std::sort(world_.scheduledTicks.begin(), world_.scheduledTicks.end(),
         [](const World::ScheduledTick& a, const World::ScheduledTick& b) {
@@ -230,9 +233,9 @@ void Simulator::sendQueuedBlockEvents() {
     while (!world_.blockEvents[static_cast<std::size_t>(world_.blockEventCacheIndex)].empty()) {
         int index = world_.blockEventCacheIndex;
         world_.blockEventCacheIndex ^= 1;
-        std::vector<World::BlockEvent> events;
-        events.swap(world_.blockEvents[static_cast<std::size_t>(index)]);
-        for (const World::BlockEvent& event : events) {
+        pendingBlockEvents_.clear();
+        pendingBlockEvents_.swap(world_.blockEvents[static_cast<std::size_t>(index)]);
+        for (const World::BlockEvent& event : pendingBlockEvents_) {
             fireBlockEvent(event);
         }
     }
@@ -272,11 +275,11 @@ void Simulator::updateEntities() {
         trace_->log(world_, "te.pendp", nullptr, 0, 0);
     }
 
-    std::vector<World::MovingBlock> done;
-    done.swap(world_.movingBuckets[static_cast<std::size_t>(oldest)]);
+    pendingDoneMoving_.clear();
+    pendingDoneMoving_.swap(world_.movingBuckets[static_cast<std::size_t>(oldest)]);
     world_.movingPtr = ((world_.movingPtr + 1) % 3 + 3) % 3;
 
-    for (const World::MovingBlock& moving : done) {
+    for (const World::MovingBlock& moving : pendingDoneMoving_) {
         if (trace) {
             trace_->logState(world_, "te.p", &moving.pos, moving.pistonState, 100, 100);
         }
