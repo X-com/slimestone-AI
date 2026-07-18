@@ -1135,6 +1135,7 @@ Simulator::ShiftCycle* Simulator::detectShiftCycle(int maxTicks, ShiftCycle& out
     BlockPos anchor;
     StateKey key = stateKey(anchor);
     seen.emplace(key, SeenState{0, anchor});
+    bool zeroShiftSeenOnce = false;
     for (int tick = 1; tick <= maxTicks; ++tick) {
         tickWorld();
         key = stateKey(anchor);
@@ -1148,6 +1149,17 @@ Simulator::ShiftCycle* Simulator::detectShiftCycle(int maxTicks, ShiftCycle& out
                 out.shift = shift;
                 return &out;
             }
+            // Stationary repeat (shift == 0): confirm it twice before giving up early - a
+            // single hit could in principle be coincidental, but seeing it again proves the
+            // loop is truly stuck and will never accumulate a net shift.
+            if (zeroShiftSeenOnce) {
+                out.start = it->second.tick;
+                out.end = tick;
+                out.period = tick - it->second.tick;
+                out.shift = shift;
+                return &out;
+            }
+            zeroShiftSeenOnce = true;
         } else {
             seen.emplace(key, SeenState{tick, anchor});
         }

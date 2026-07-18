@@ -1030,6 +1030,7 @@ private:
         // Above assumes the very first insert never collides into an already-used slot, which
         // holds because the table was just cleared - equivalent to seenFind()'s insert branch.
 
+        bool zeroShiftSeenOnce = false;
         for (int tick = 1; tick <= maxTicks; ++tick) {
             tickWorld();
             if (world_.error_) return false;
@@ -1048,6 +1049,17 @@ private:
                     out.shift = shift;
                     return true;
                 }
+                // Stationary repeat (shift == 0): confirm it twice before giving up early - a
+                // single hit could in principle be coincidental, but seeing it again proves the
+                // loop is truly stuck and will never accumulate a net shift.
+                if (zeroShiftSeenOnce) {
+                    out.start = seenTick;
+                    out.end = tick;
+                    out.period = tick - seenTick;
+                    out.shift = shift;
+                    return true;
+                }
+                zeroShiftSeenOnce = true;
             }
             if (world_.error_) return false;
         }
