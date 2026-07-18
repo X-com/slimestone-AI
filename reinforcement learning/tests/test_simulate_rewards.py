@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import itertools
+import time
 
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
 from genetic_ml.archive import Archive
 from genetic_ml.compact_format import read_compact_file
 from genetic_ml.compact_working_writer import CompactWorkingWriter
+from genetic_ml.population import canonical_hash
+from genetic_ml.tried_log import TriedLog
 
 from rl_ml.tasks.dummy_task import DummyContext, DummyTask
 from rl_ml.train_loop import _simulate_rewards
@@ -27,6 +30,14 @@ class _StubPool:
 
     def run_all(self, candidates: list[dict]) -> list[dict]:
         return [self.results_by_candidate_id[candidate["id"]] for candidate in candidates]
+
+
+class _ExplodingPool:
+    """A pool whose run_all() must never be called - used to prove a cache hit skips
+    simulation entirely rather than merely stubbing out what the (unreachable) result would be."""
+
+    def run_all(self, candidates: list[dict]) -> list[dict]:
+        raise AssertionError(f"run_all() should not have been called for {candidates!r} - expected a cache hit")
 
 
 def test_rewards_align_with_contexts_regardless_of_which_actions_were_simulated():
@@ -83,3 +94,42 @@ def test_rediscovering_the_same_candidate_saves_to_working_writer_only_once(tmp_
     archive.flush()
     writer.flush()
     assert len(read_compact_file(tmp_path / "compact" / "flyers.data")) == 1
+
+
+def test_tried_log_records_every_simulated_outcome():
+    task = DummyTask()
+    context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
+    tried_log = TriedLog.__new__(TriedLog)  # avoid touching disk for this pure in-memory check
+    tried_log._tried = {}
+    tried_log._pending = []
+    tried_log.flush_interval_seconds = 3600.0
+    tried_log._last_flush = time.monotonic()
+    pool = _StubPool({1: {"validCycle": True}})
+
+    _simulate_rewards(
+        task, [context], [True], pool, itertools.count(1), archive=None, working_writer=None,
+        generation=1, tried_log=tried_log,
+    )
+
+    candidate = task.build_candidate(context, True, candidate_id=99)
+    assert tried_log.outcome(canonical_hash(candidate)) is True
+
+
+def test_tried_log_cache_hit_skips_resimulation_and_recovers_the_same_reward():
+    task = DummyTask()
+    context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
+    candidate = task.build_candidate(context, True, candidate_id=1)
+    candidate_hash = canonical_hash(candidate)
+
+    tried_log = TriedLog.__new__(TriedLog)
+    tried_log._tried = {candidate_hash: True}
+    tried_log._pending = []
+    tried_log.flush_interval_seconds = 3600.0
+    tried_log._last_flush = time.monotonic()
+
+    rewards = _simulate_rewards(
+        task, [context], [True], _ExplodingPool(), itertools.count(1), archive=None, working_writer=None,
+        generation=1, tried_log=tried_log,
+    )
+
+    assert rewards == [1.0]  # same reward task.reward_of(True, {"validCycle": True}) would give

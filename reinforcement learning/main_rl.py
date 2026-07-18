@@ -26,11 +26,15 @@ SIMULATOR_EXE = (
 WORKING_DIR = PROJECT_ROOT / "data" / "working"
 CHECKPOINT_PATH = PROJECT_ROOT / "data" / "checkpoints" / "latest.json"
 ARCHIVE_PATH = PROJECT_ROOT / "data" / "outputs" / "rl_archive.jsonl"
+# Compact hash-only log ("hash,1" or "hash,0" per line) of every candidate shape ever simulated,
+# working or not - see genetic_ml/tried_log.py. Lets _simulate_rewards recover an already-tried
+# shape's reward directly instead of resimulating it.
+TRIED_LOG = PROJECT_ROOT / "data" / "outputs" / "tried.log"
 COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
-# How many distinct working machines CompactWorkingWriter buffers in memory before writing them
-# to flyers.data in one batch. A graceful exit (Ctrl+C or normal completion) always flushes
-# everything regardless of this value - it only controls how often mid-run writes happen.
-COMPACT_FLUSH_EVERY = 100
+# How often CompactWorkingWriter/Archive/TriedLog write their buffered records to disk in one
+# batch, in seconds. A graceful exit (Ctrl+C or normal completion) always flushes everything
+# regardless of this value - it only controls how often mid-run writes happen.
+FLUSH_INTERVAL_SECONDS = 1.0
 
 # Which training objective to run - swap this for a different rl_ml/tasks/*.py implementation, or
 # pass more candidate_block_ids to train one shared model across several block types, to change
@@ -86,7 +90,7 @@ def main() -> None:
         max_ticks=MAX_TICKS,
         simulation_timeout_seconds=SIMULATION_TIMEOUT_SECONDS,
     )
-    working_writer = CompactWorkingWriter(COMPACT_DIR, flush_every=COMPACT_FLUSH_EVERY)
+    working_writer = CompactWorkingWriter(COMPACT_DIR, flush_interval_seconds=FLUSH_INTERVAL_SECONDS)
 
     train(
         TASK,
@@ -101,11 +105,14 @@ def main() -> None:
         rng=rng,
         archive_path=ARCHIVE_PATH,
         working_writer=working_writer,
+        tried_log_path=str(TRIED_LOG),
+        flush_interval_seconds=FLUSH_INTERVAL_SECONDS,
     )
 
     print(f"Done: {policy.iteration} iteration(s) run. Final weights: {policy.weights}")
     print(f"Checkpoint: {CHECKPOINT_PATH}")
     print(f"Archive: {ARCHIVE_PATH}")
+    print(f"Tried log: {TRIED_LOG}")
     print(f"Compact working machines: {working_writer.path}")
 
 

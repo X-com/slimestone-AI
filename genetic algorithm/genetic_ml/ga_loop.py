@@ -4,6 +4,7 @@ import itertools
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from genetic_ml.archive import Archive
@@ -12,6 +13,7 @@ from genetic_ml.failure_log import FailureLogger
 from genetic_ml.mutation import mutate
 from genetic_ml.population import Lineage, Population, canonical_hash
 from genetic_ml.simulator_pool import SimulatorPool
+from genetic_ml.tried_log import TriedLog
 from genetic_ml.working_folder import WorkingFolderWriter
 
 Candidate = dict[str, Any]
@@ -66,7 +68,8 @@ def run_ga(
     working_dir_prefix: str = "discovered",
     pool: SimulatorPool | None = None,
     working_writer: object | None = None,
-    archive_flush_every: int = 100,
+    flush_interval_seconds: float = 1.0,
+    tried_log_path: str | None = None,
 ) -> GAResult:
     """pool lets a caller supply an already-constructed SimulatorPool (or subclass) instead of
     having run_ga build a plain one. Defaults to None, which preserves the exact previous
@@ -77,17 +80,27 @@ def run_ga(
     - instead of having run_ga build a plain WorkingFolderWriter from working_dir/working_dir_prefix.
     Defaults to None, which preserves the exact previous behavior.
 
-    archive_flush_every controls how many discoveries Archive buffers in memory before writing
-    them to disk in one batch (see genetic_ml.archive.Archive) - raise it to cut disk writes
-    further on a long run, at the cost of losing more buffered-but-unflushed discoveries if the
-    process is killed uncleanly (a graceful Ctrl+C or normal exit still flushes everything)."""
+    flush_interval_seconds is passed to both Archive and TriedLog (see genetic_ml.archive.Archive,
+    genetic_ml.tried_log.TriedLog): each buffers new records in memory and writes them to disk in
+    one batch at most once per this many seconds, rather than opening/writing/closing the file on
+    every single discovery - a long run can find candidates in rapid bursts, and a disk write+flush
+    per discovery adds up to a lot of small writes over a long run. Raise it to cut disk writes
+    further, at the cost of losing more buffered-but-unflushed discoveries if the process is
+    killed uncleanly (a graceful Ctrl+C or normal exit still flushes everything).
+
+    tried_log_path defaults to a "tried.log" file next to archive_path - see
+    genetic_ml.tried_log.TriedLog. Every simulated candidate's hash (working or not) is recorded
+    there so a later generation never re-simulates the same (or structurally-identical) shape,
+    including ones that failed and were never accepted into the transient exploration list."""
     if not seed_candidates:
         raise ValueError("run_ga requires at least one seed candidate")
 
     rng = random.Random(ga_config.seed)
     population = Population(capacity=ga_config.population_capacity)
     population.seed(seed_candidates)
-    archive = Archive(archive_path, flush_every=archive_flush_every)
+    archive = Archive(archive_path, flush_interval_seconds=flush_interval_seconds)
+    resolved_tried_log_path = tried_log_path or str(Path(archive_path).with_name("tried.log"))
+    tried_log = TriedLog(resolved_tried_log_path, flush_interval_seconds=flush_interval_seconds)
     failure_logger = FailureLogger(crash_dir, hang_dir) if crash_dir is not None and hang_dir is not None else None
     resolved_working_writer = (
         working_writer
@@ -134,6 +147,7 @@ def run_ga(
                             child_hash in seen_this_batch
                             or population.has_seen(child_hash)
                             or archive.has(child_hash)
+                            or tried_log.has(child_hash)
                         ):
                             continue
                         seen_this_batch.add(child_hash)
@@ -156,6 +170,7 @@ def run_ga(
                     # simulator's ground-truth check: does the machine settle and end up an exact
                     # translated copy of its starting layout, not just "a repeat was detected."
                     working = result.get("validCycle") is True
+                    tried_log.record(child_hash, working)
                     if working:
                         lineage = Lineage(
                             candidate=child,
@@ -200,10 +215,12 @@ def run_ga(
         except KeyboardInterrupt:
             print(f"\nInterrupted after {generations_completed} generation(s) - stopping gracefully...")
         finally:
-            # Buffered writers (Archive, CompactWorkingWriter) hold discoveries in memory
-            # between disk flushes - always flush before returning, whether the run finished
-            # normally, was interrupted, or hit an exception, so nothing buffered is lost.
+            # Buffered writers (Archive, TriedLog, CompactWorkingWriter) hold discoveries in
+            # memory between disk flushes - always flush before returning, whether the run
+            # finished normally, was interrupted, or hit an exception, so nothing buffered is
+            # lost.
             archive.flush()
+            tried_log.flush()
             if resolved_working_writer is not None and hasattr(resolved_working_writer, "flush"):
                 resolved_working_writer.flush()
 

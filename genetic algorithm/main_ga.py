@@ -34,14 +34,21 @@ WORKING_STORAGE_FORMAT = "compact"  # "json" or "compact"
 DISCOVERED_NAME_PREFIX = "discovered"
 COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
 
-# How many discoveries to buffer in memory before writing them to disk in one batch (applies to
-# both the archive and, in "compact" mode, flyers.data - see genetic_ml/archive.py and
-# genetic_ml/compact_working_writer.py). Higher = fewer disk writes on a long run, at the cost
-# of losing more buffered-but-unflushed discoveries if the process is killed uncleanly (a
-# graceful Ctrl+C or normal exit always flushes everything regardless of this value).
-DISCOVERY_FLUSH_EVERY = 200
+# How often buffered discoveries get written to disk in one batch, in seconds - applies to the
+# archive, tried.log, and in "compact" mode, flyers.data (see genetic_ml/archive.py,
+# genetic_ml/tried_log.py, genetic_ml/compact_working_writer.py). Higher = fewer disk writes on
+# a long run, at the cost of losing more buffered-but-unflushed discoveries if the process is
+# killed uncleanly (a graceful Ctrl+C or normal exit always flushes everything regardless of
+# this value).
+FLUSH_INTERVAL_SECONDS = 1.0
 
 ARCHIVE_JSONL = PROJECT_ROOT / "data" / "outputs" / "ga_archive.jsonl"
+# Compact hash-only log ("hash,1" or "hash,0" per line) of every candidate shape ever simulated,
+# working or not - see genetic_ml/tried_log.py. Stops the GA from re-simulating a candidate
+# whose shape was already tried (successfully or not) in an earlier generation. Tiny disk
+# footprint compared to ga_archive.jsonl, which stores the full candidate/result per discovery -
+# tried.log only ever needs a hash and a one-character outcome flag.
+TRIED_LOG = PROJECT_ROOT / "data" / "outputs" / "tried.log"
 # Every mutated candidate that crashes or hangs the simulator is written here as a
 # bare candidate JSON (crash_0001.json, hung_0001.json, ...), for later use as
 # regression/repro cases while hardening the C++ simulator.
@@ -98,7 +105,7 @@ def main() -> None:
     )
 
     if WORKING_STORAGE_FORMAT == "compact":
-        working_writer = CompactWorkingWriter(COMPACT_DIR, flush_every=DISCOVERY_FLUSH_EVERY)
+        working_writer = CompactWorkingWriter(COMPACT_DIR, flush_interval_seconds=FLUSH_INTERVAL_SECONDS)
         working_output_desc = working_writer.path
     else:
         working_writer = WorkingFolderWriter(WORKING_DIR, DISCOVERED_NAME_PREFIX)
@@ -112,7 +119,8 @@ def main() -> None:
         crash_dir=str(CRASH_DIR),
         hang_dir=str(HANGS_DIR),
         working_writer=working_writer,
-        archive_flush_every=DISCOVERY_FLUSH_EVERY,
+        flush_interval_seconds=FLUSH_INTERVAL_SECONDS,
+        tried_log_path=str(TRIED_LOG),
     )
 
     print(
@@ -123,6 +131,7 @@ def main() -> None:
         f"{result.crashes_logged} crash(es) logged, {result.hangs_logged} hang(s) logged"
     )
     print(f"Archive: {ARCHIVE_JSONL}")
+    print(f"Tried log: {TRIED_LOG}")
     print(f"Working output ({WORKING_STORAGE_FORMAT}): {working_output_desc}")
     print(f"Crash log: {CRASH_DIR}")
     print(f"Hang log: {HANGS_DIR}")

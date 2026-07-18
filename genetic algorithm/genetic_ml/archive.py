@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,19 +14,21 @@ class Archive:
     found, independent of whether it's still in the live population. This is the
     actual output of a run - the live population is just the search frontier.
 
-    Writes are buffered in memory and flushed to disk in batches (flush_every records, or
-    an explicit flush() call) rather than opening/writing/closing the file on every single
+    Writes are buffered in memory and flushed to disk at most once every flush_interval_seconds
+    (or on an explicit flush() call) rather than opening/writing/closing the file on every single
     discovery - a long run can find candidates in rapid bursts, and a disk write+flush per
-    discovery adds up to a lot of small writes over a long run. Dedup (has()) is unaffected:
-    _known_hashes is updated immediately in record(), before the write is ever buffered or
-    flushed, so in-memory correctness doesn't depend on when the disk catches up. Callers
-    must call flush() before the process exits (run_ga does this in a finally block) or
+    discovery adds up to a lot of small writes over a long run. Time-based rather than
+    count-based so the write rate stays bounded regardless of discovery rate. Dedup (has()) is
+    unaffected: _known_hashes is updated immediately in record(), before the write is ever
+    buffered or flushed, so in-memory correctness doesn't depend on when the disk catches up.
+    Callers must call flush() before the process exits (run_ga does this in a finally block) or
     buffered-but-unflushed discoveries are lost."""
 
-    def __init__(self, path: str | Path, flush_every: int = 20) -> None:
+    def __init__(self, path: str | Path, flush_interval_seconds: float = 1.0) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.flush_every = flush_every
+        self.flush_interval_seconds = flush_interval_seconds
+        self._last_flush = time.monotonic()
         self._known_hashes: set[str] = set()
         self._pending: list[str] = []
         if self.path.exists():
@@ -52,7 +55,8 @@ class Archive:
         origin: str,
     ) -> bool:
         """Buffers a discovery if its hash hasn't been recorded before, flushing to disk once
-        flush_every have accumulated. Returns True if it was newly recorded."""
+        flush_interval_seconds has elapsed since the last flush. Returns True if it was newly
+        recorded."""
 
         if candidate_hash in self._known_hashes:
             return False
@@ -68,13 +72,15 @@ class Archive:
         }
         self._pending.append(json.dumps(entry, separators=(",", ":")))
         self._known_hashes.add(candidate_hash)
-        if len(self._pending) >= self.flush_every:
+        if time.monotonic() - self._last_flush >= self.flush_interval_seconds:
             self.flush()
         return True
 
     def flush(self) -> None:
         """Writes every buffered record to disk in one batch. Safe to call with nothing
-        pending (no-op)."""
+        pending (no-op). Always resets the flush-interval clock, whether or not anything was
+        actually pending, so an explicit flush() also restarts the throttle window."""
+        self._last_flush = time.monotonic()
         if not self._pending:
             return
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
