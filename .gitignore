@@ -3,3 +3,4 @@ data/dev-certs/
 **/__pycache__
 **/build
 **/.venv
+**/.pytest_cache
