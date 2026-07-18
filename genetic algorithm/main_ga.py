@@ -34,24 +34,27 @@ WORKING_STORAGE_FORMAT = "compact"  # "json" or "compact"
 DISCOVERED_NAME_PREFIX = "discovered"
 COMPACT_DIR = PROJECT_ROOT / "data" / "compact-working"
 
-# How often buffered discoveries get written to disk in one batch, in seconds - applies to the
-# archive, tried.log, and in "compact" mode, flyers.data (see genetic_ml/archive.py,
-# genetic_ml/tried_log.py, genetic_ml/compact_working_writer.py). Higher = fewer disk writes on
-# a long run, at the cost of losing more buffered-but-unflushed discoveries if the process is
-# killed uncleanly (a graceful Ctrl+C or normal exit always flushes everything regardless of
-# this value).
+# How often buffered records get written to disk in one batch, in seconds - applies to both
+# hash logs and, in "compact" mode, flyers.data (see genetic_ml/hash_log.py,
+# genetic_ml/compact_working_writer.py). Higher = fewer disk writes on a long run, at the cost
+# of losing more buffered-but-unflushed records if the process is killed uncleanly (a graceful
+# Ctrl+C or normal exit always flushes everything regardless of this value).
 FLUSH_INTERVAL_SECONDS = 1.0
 
-ARCHIVE_JSONL = PROJECT_ROOT / "data" / "outputs" / "ga_archive.jsonl"
-# Compact hash-only log ("hash,1" or "hash,0" per line) of every candidate shape ever simulated,
-# working or not - see genetic_ml/tried_log.py. Stops the GA from re-simulating a candidate
-# whose shape was already tried (successfully or not) in an earlier generation. Tiny disk
-# footprint compared to ga_archive.jsonl, which stores the full candidate/result per discovery -
-# tried.log only ever needs a hash and a one-character outcome flag.
-TRIED_LOG = PROJECT_ROOT / "data" / "outputs" / "tried.log"
+# Fixed-width binary hash logs (see genetic_ml/hash_log.py) - no candidate/result payload, just
+# hash bytes back-to-back. The full candidate for a working discovery lives in flyers.data/
+# WORKING_DIR instead (via working_writer below), never duplicated here.
+# WORKING_HASHES keeps the full 32-byte hash (exact - a false "yes, this works" would corrupt
+# downstream reward signals). NOT_WORKING_HASHES truncates to 8 bytes: that side is the volume
+# problem (every simulated candidate that fails, not just discoveries), and a rare false
+# positive there only ever costs a missed opportunity to try a fresh candidate, never a wrong
+# "confirmed working" result.
+WORKING_HASHES = PROJECT_ROOT / "data" / "outputs" / "working_hashes.log"
+NOT_WORKING_HASHES = PROJECT_ROOT / "data" / "outputs" / "not_working_hashes.log"
+
 # Every mutated candidate that crashes or hangs the simulator is written here as a
 # bare candidate JSON (crash_0001.json, hung_0001.json, ...), for later use as
-# regression/repro cases while hardening the C++ simulator.
+# regression/repro cases while hardening the C++ simulator. See genetic_ml/failure_log.py.
 CRASH_DIR = PROJECT_ROOT / "data" / "crash"
 HANGS_DIR = PROJECT_ROOT / "data" / "hangs"
 
@@ -115,23 +118,24 @@ def main() -> None:
         simulator_config,
         ga_config,
         seeds,
-        str(ARCHIVE_JSONL),
-        crash_dir=str(CRASH_DIR),
-        hang_dir=str(HANGS_DIR),
+        str(WORKING_HASHES),
+        not_working_hashes_path=str(NOT_WORKING_HASHES),
         working_writer=working_writer,
         flush_interval_seconds=FLUSH_INTERVAL_SECONDS,
-        tried_log_path=str(TRIED_LOG),
+        crash_dir=str(CRASH_DIR),
+        hang_dir=str(HANGS_DIR),
     )
 
     print(
         f"Done: {result.generations_run} generation(s), "
         f"{result.total_simulated} candidate(s) simulated, "
-        f"{len(result.archive)} distinct working machine(s) in archive, "
+        f"{len(result.working_hashes)} distinct working machine(s), "
+        f"{len(result.not_working_hashes)} distinct not-working shape(s) ruled out, "
         f"{len(result.population)} lineage(s) in final population, "
-        f"{result.crashes_logged} crash(es) logged, {result.hangs_logged} hang(s) logged"
+        f"(C/H):({result.crashes_logged},{result.hangs_logged})"
     )
-    print(f"Archive: {ARCHIVE_JSONL}")
-    print(f"Tried log: {TRIED_LOG}")
+    print(f"Working hashes: {WORKING_HASHES}")
+    print(f"Not-working hashes: {NOT_WORKING_HASHES}")
     print(f"Working output ({WORKING_STORAGE_FORMAT}): {working_output_desc}")
     print(f"Crash log: {CRASH_DIR}")
     print(f"Hang log: {HANGS_DIR}")

@@ -17,6 +17,14 @@ class SimulatorPool:
             SimulatorProcess(self.config, worker_index=index)
             for index in range(self.config.worker_count)
         ]
+        # crash_count/hang_count are always tracked (cheap, in-memory) so a caller can report
+        # how many candidates crashed/hung the simulator even without failure_logger configured.
+        # failure_logger, when given, additionally writes each one to disk as a repro case - see
+        # genetic_ml/failure_log.py. Both are updated from worker threads in _worker_loop, so
+        # guarded by a lock.
+        self.crash_count = 0
+        self.hang_count = 0
+        self._counts_lock = threading.Lock()
 
     def __enter__(self) -> "SimulatorPool":
         for worker in self.workers:
@@ -42,7 +50,7 @@ class SimulatorPool:
         threads = [
             threading.Thread(
                 target=self._worker_loop,
-                args=(worker, work_queue, results, self.failure_logger),
+                args=(worker, work_queue, results),
                 daemon=True,
             )
             for worker in self.workers
@@ -54,12 +62,11 @@ class SimulatorPool:
 
         return [result for result in results if result is not None]
 
-    @staticmethod
     def _worker_loop(
+        self,
         worker: SimulatorProcess,
         work_queue: queue.Queue[tuple[int, dict[str, Any]] | None],
         results: list[dict[str, Any] | None],
-        failure_logger: FailureLogger | None,
     ) -> None:
         while True:
             item = work_queue.get()
@@ -83,9 +90,14 @@ class SimulatorPool:
                     "errorCode": "worker_hung" if kind == "hang" else "worker_crashed",
                     "error": str(exc),
                 }
-                if failure_logger is not None:
+                with self._counts_lock:
+                    if kind == "hang":
+                        self.hang_count += 1
+                    else:
+                        self.crash_count += 1
+                if self.failure_logger is not None:
                     try:
-                        path = failure_logger.log(kind, candidate)
+                        path = self.failure_logger.log(kind, candidate)
                         print(f"[{kind}] candidate id={candidate.get('id')} -> {path}")
                     except OSError:
                         pass

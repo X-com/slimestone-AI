@@ -4,11 +4,10 @@ import itertools
 import time
 
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
-from genetic_ml.archive import Archive
 from genetic_ml.compact_format import read_compact_file
 from genetic_ml.compact_working_writer import CompactWorkingWriter
+from genetic_ml.hash_log import HashLog
 from genetic_ml.population import canonical_hash
-from genetic_ml.tried_log import TriedLog
 
 from rl_ml.tasks.dummy_task import DummyContext, DummyTask
 from rl_ml.train_loop import _simulate_rewards
@@ -18,6 +17,18 @@ _MACHINE = {
     "trigger": {"x": 0, "y": 0, "z": 0},
     "blocks": [{"x": 0, "y": 0, "z": 0, "state": 1}],
 }
+
+
+def _bare_hash_log(hash_bytes: int) -> HashLog:
+    """A HashLog with a huge flush interval so record() never auto-flushes mid-test - avoids
+    touching disk for pure in-memory checks."""
+    log = HashLog.__new__(HashLog)
+    log.hash_bytes = hash_bytes
+    log._seen = set()
+    log._pending = []
+    log.flush_interval_seconds = 3600.0
+    log._last_flush = time.monotonic()
+    return log
 
 
 class _StubPool:
@@ -49,87 +60,104 @@ def test_rewards_align_with_contexts_regardless_of_which_actions_were_simulated(
     actions = [True, False]  # only the first gets simulated (build_candidate(False, ...) is None)
     pool = _StubPool({1: {"validCycle": True}})
 
-    rewards = _simulate_rewards(
-        task, contexts, actions, pool, itertools.count(1), archive=None, working_writer=None, generation=1
-    )
+    rewards = _simulate_rewards(task, contexts, actions, pool, itertools.count(1), working_writer=None)
 
     assert rewards == [1.0, 0.0]
 
 
-def test_a_failed_addition_is_never_archived_or_saved(tmp_path):
+def test_a_failed_addition_is_never_recorded_as_working_or_saved(tmp_path):
     task = DummyTask()
     contexts = [DummyContext(machine=_MACHINE, position=(1, 0, 0))]
-    archive = Archive(tmp_path / "archive.jsonl")
+    working_hashes = HashLog(tmp_path / "working_hashes.log", hash_bytes=32)
+    not_working_hashes = HashLog(tmp_path / "not_working_hashes.log", hash_bytes=8)
     writer = CompactWorkingWriter(tmp_path / "compact")
     pool = _StubPool({1: {"validCycle": False}})
 
     rewards = _simulate_rewards(
-        task, contexts, [True], pool, itertools.count(1), archive, writer, generation=1
+        task, contexts, [True], pool, itertools.count(1), writer, working_hashes, not_working_hashes
     )
 
     assert rewards == [-1.0]
-    assert len(archive) == 0
+    assert len(working_hashes) == 0
+    assert len(not_working_hashes) == 1
     assert writer._pending == []
 
 
 def test_rediscovering_the_same_candidate_saves_to_working_writer_only_once(tmp_path):
     task = DummyTask()
     contexts = [DummyContext(machine=_MACHINE, position=(1, 0, 0))]
-    archive = Archive(tmp_path / "archive.jsonl")
+    working_hashes = HashLog(tmp_path / "working_hashes.log", hash_bytes=32)
+    not_working_hashes = HashLog(tmp_path / "not_working_hashes.log", hash_bytes=8)
     writer = CompactWorkingWriter(tmp_path / "compact")
     next_id = itertools.count(1)
 
     first = _simulate_rewards(
-        task, contexts, [True], _StubPool({1: {"validCycle": True}}), next_id, archive, writer, generation=1
+        task, contexts, [True], _StubPool({1: {"validCycle": True}}), next_id, writer,
+        working_hashes, not_working_hashes,
     )
     second = _simulate_rewards(
-        task, contexts, [True], _StubPool({2: {"validCycle": True}}), next_id, archive, writer, generation=2
+        task, contexts, [True], _StubPool({2: {"validCycle": True}}), next_id, writer,
+        working_hashes, not_working_hashes,
     )
 
     assert first == [1.0]
     assert second == [1.0]
-    assert len(archive) == 1  # deduped by canonical_hash despite the different candidate ids
+    assert len(working_hashes) == 1  # deduped by canonical_hash despite the different candidate ids
     assert len(writer._pending) == 1  # working_writer.save() only called on the first discovery
 
-    archive.flush()
+    working_hashes.flush()
     writer.flush()
     assert len(read_compact_file(tmp_path / "compact" / "flyers.data")) == 1
 
 
-def test_tried_log_records_every_simulated_outcome():
+def test_hash_logs_record_every_simulated_outcome_in_the_matching_file():
     task = DummyTask()
     context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
-    tried_log = TriedLog.__new__(TriedLog)  # avoid touching disk for this pure in-memory check
-    tried_log._tried = {}
-    tried_log._pending = []
-    tried_log.flush_interval_seconds = 3600.0
-    tried_log._last_flush = time.monotonic()
+    working_hashes = _bare_hash_log(hash_bytes=32)
+    not_working_hashes = _bare_hash_log(hash_bytes=8)
     pool = _StubPool({1: {"validCycle": True}})
 
     _simulate_rewards(
-        task, [context], [True], pool, itertools.count(1), archive=None, working_writer=None,
-        generation=1, tried_log=tried_log,
+        task, [context], [True], pool, itertools.count(1), working_writer=None,
+        working_hashes=working_hashes, not_working_hashes=not_working_hashes,
     )
 
     candidate = task.build_candidate(context, True, candidate_id=99)
-    assert tried_log.outcome(canonical_hash(candidate)) is True
+    assert working_hashes.has(canonical_hash(candidate)) is True
+    assert not_working_hashes.has(canonical_hash(candidate)) is False
 
 
-def test_tried_log_cache_hit_skips_resimulation_and_recovers_the_same_reward():
+def test_working_cache_hit_skips_resimulation_and_recovers_the_same_reward():
     task = DummyTask()
     context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
     candidate = task.build_candidate(context, True, candidate_id=1)
     candidate_hash = canonical_hash(candidate)
 
-    tried_log = TriedLog.__new__(TriedLog)
-    tried_log._tried = {candidate_hash: True}
-    tried_log._pending = []
-    tried_log.flush_interval_seconds = 3600.0
-    tried_log._last_flush = time.monotonic()
+    working_hashes = _bare_hash_log(hash_bytes=32)
+    working_hashes._seen = {bytes.fromhex(candidate_hash)}
+    not_working_hashes = _bare_hash_log(hash_bytes=8)
 
     rewards = _simulate_rewards(
-        task, [context], [True], _ExplodingPool(), itertools.count(1), archive=None, working_writer=None,
-        generation=1, tried_log=tried_log,
+        task, [context], [True], _ExplodingPool(), itertools.count(1), working_writer=None,
+        working_hashes=working_hashes, not_working_hashes=not_working_hashes,
     )
 
     assert rewards == [1.0]  # same reward task.reward_of(True, {"validCycle": True}) would give
+
+
+def test_not_working_cache_hit_skips_resimulation_and_recovers_the_same_reward():
+    task = DummyTask()
+    context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
+    candidate = task.build_candidate(context, True, candidate_id=1)
+    candidate_hash = canonical_hash(candidate)
+
+    working_hashes = _bare_hash_log(hash_bytes=32)
+    not_working_hashes = _bare_hash_log(hash_bytes=8)
+    not_working_hashes._seen = {bytes.fromhex(candidate_hash)[:8]}
+
+    rewards = _simulate_rewards(
+        task, [context], [True], _ExplodingPool(), itertools.count(1), working_writer=None,
+        working_hashes=working_hashes, not_working_hashes=not_working_hashes,
+    )
+
+    assert rewards == [-1.0]  # same reward task.reward_of(True, {"validCycle": False}) would give
