@@ -15,10 +15,17 @@ import type { Machine } from './data'
 const GAP = 3 // empty cells between machines
 
 export interface SceneHandle {
-  setMachines(machines: Machine[], onSelect: (m: Machine | null) => void): void
+  // keepCamera: after the first build, leave the camera where it is instead of re-framing
+  // (used by the live dashboard so a new batch / page swap doesn't snap the view).
+  setMachines(
+    machines: Machine[],
+    onSelect: (m: Machine | null) => void,
+    keepCamera?: boolean,
+  ): void
   setSelected(hash: string | null): void
   focusSelected(hash: string): void // recenter + zoom-to-fit a machine (arrow navigation)
   setElevation(elevationDeg: number): void // snap up/down, keeping current azimuth
+  resetView(): void // re-frame the whole current set (undo any orbit/zoom)
   dispose(): void
 }
 
@@ -94,6 +101,8 @@ export function createScene(container: HTMLElement): SceneHandle {
   let placed: Placed[] = []
   let onSelectCb: (m: Machine | null) => void = () => {}
   let selectedHash: string | null = null
+  let hasFramed = false // whether the camera has been auto-framed at least once
+  let lastFrame: [cols: number, n: number, cell: number] | null = null // for resetView()
   let buildToken = 0
 
   const dummy = new THREE.Object3D()
@@ -122,7 +131,11 @@ export function createScene(container: HTMLElement): SceneHandle {
     }
   }
 
-  async function setMachines(machines: Machine[], onSelect: (m: Machine | null) => void) {
+  async function setMachines(
+    machines: Machine[],
+    onSelect: (m: Machine | null) => void,
+    keepCamera = false,
+  ) {
     const token = ++buildToken
     onSelectCb = onSelect
     await assetsReady // first call waits for the atlas; later calls resolve instantly
@@ -219,23 +232,31 @@ export function createScene(container: HTMLElement): SceneHandle {
       const geo = assets ? assets.geo(id) : plainBox
       const mat = assets ? assets.material(id) : coloredMat(id)
       const mesh = new THREE.InstancedMesh(geo, mat, list.length)
-      mesh.frustumCulled = false
       mesh.userData.machines = list.map((e) => e.machine)
       list.forEach((e, i) => mesh.setMatrixAt(i, e.matrix))
       mesh.instanceMatrix.needsUpdate = true
+      // A packed per-block-type mesh spans the whole field, so per-object frustum culling just
+      // pops the entire layer in/out when its grid-wide bounds leave the view — no draw-call win
+      // (packing already gave that). Keep culling off; the pop-out was the visible regression.
+      mesh.frustumCulled = false
       scene.add(mesh)
       blockMeshes.push(mesh)
     }
 
     // Trigger glows (one instance per machine); not raycast so it never steals clicks.
     triggerMesh = new THREE.InstancedMesh(triggerGeo, triggerMat, triggerMats.length)
-    triggerMesh.frustumCulled = false
     triggerMesh.renderOrder = 2 // after opaque blocks
     triggerMats.forEach((mtx, i) => triggerMesh!.setMatrixAt(i, mtx))
     triggerMesh.instanceMatrix.needsUpdate = true
+    triggerMesh.frustumCulled = false
     scene.add(triggerMesh)
 
-    frameAll(cols, machines.length, cell)
+    lastFrame = [cols, machines.length, cell] // remembered so resetView() can re-frame on demand
+    // Frame on the first build; afterwards honour keepCamera so live updates don't snap the view.
+    if (!keepCamera || !hasFramed) {
+      frameAll(cols, machines.length, cell)
+      hasFramed = true
+    }
     setSelected(selectedHash) // reattach any current selection to the rebuilt meshes
   }
 
@@ -246,11 +267,28 @@ export function createScene(container: HTMLElement): SceneHandle {
     const cx = w / 2 - cell / 2
     const cz = d / 2 - cell / 2
     const radius = Math.max(w, d)
+    // Iso-ish offset direction from the target.
+    _dir.set(radius * 0.5, radius * 0.7 + 8, radius * 0.75)
+    const baseLen = _dir.length()
+    // Aspect-aware fit: the grid's half-extent must fit the *smaller* of the horizontal/vertical
+    // FOV so a short/wide viewport (the dashboard's top strip) doesn't clip machines.
+    const R = 0.5 * Math.hypot(w, d) + cell
+    const vHalf = (camera.fov * Math.PI) / 360
+    const hHalf = Math.atan(Math.tan(vHalf) * Math.max(0.0001, camera.aspect))
+    const fitDist = R / Math.sin(Math.max(0.01, Math.min(vHalf, hHalf)))
+    // Frame 20% closer than the base, but never nearer than the fit distance (else it clips).
+    const dist = Math.max(baseLen * 0.8, fitDist)
+    _dir.setLength(dist)
     controls.target.set(cx, 2, cz)
-    camera.position.set(cx + radius * 0.5, radius * 0.7 + 10, cz + radius * 0.75)
-    camera.far = radius * 6 + 100
+    camera.position.set(cx + _dir.x, 2 + _dir.y, cz + _dir.z)
+    camera.far = dist * 6 + 100
     camera.updateProjectionMatrix()
     controls.update()
+  }
+
+  // Re-frame the whole current set (undo any manual orbit/zoom).
+  function resetView() {
+    if (lastFrame) frameAll(lastFrame[0], lastFrame[1], lastFrame[2])
   }
 
   // Snap to a target elevation, keeping the current azimuth + zoom distance.
@@ -268,25 +306,14 @@ export function createScene(container: HTMLElement): SceneHandle {
     controls.update()
   }
 
-  // Recenter + zoom so this machine fits the view, keeping the current angle. (arrow nav)
+  // Recenter the view on a machine with a gentle pan — same angle AND same zoom distance, so
+  // stepping through machines just glides the pivot over instead of snapping the zoom. (arrow nav)
   function focusSelected(hash: string) {
     const hit = placed.find((p) => p.machine.hash === hash)
     if (!hit) return
     const center = hit.box.getCenter(_tmp)
-    const size = hit.box.getSize(_dir)
-    const maxDim = Math.max(size.x, size.y, size.z, 1)
-    const dist = ((maxDim * 0.5) / Math.tan((camera.fov * Math.PI) / 360)) * 1.8
-    let dx = camera.position.x - controls.target.x
-    let dy = camera.position.y - controls.target.y
-    let dz = camera.position.z - controls.target.z
-    let len = Math.hypot(dx, dy, dz)
-    if (len < 1e-4) ((dx = 0.6), (dy = 0.7), (dz = 0.75), (len = Math.hypot(0.6, 0.7, 0.75)))
+    camera.position.add(_dir.subVectors(center, controls.target))
     controls.target.copy(center)
-    camera.position.set(
-      center.x + (dx / len) * dist,
-      center.y + (dy / len) * dist,
-      center.z + (dz / len) * dist,
-    )
     controls.update()
   }
 
@@ -296,12 +323,8 @@ export function createScene(container: HTMLElement): SceneHandle {
     if (hit) {
       selectionBox.box.copy(hit.box)
       selectionBox.visible = true
-      // Pivot all camera movement around the selection: pan the rig so its center
-      // becomes controls.target (view angle + zoom unchanged -> gentle recenter).
-      const center = hit.box.getCenter(_tmp)
-      camera.position.add(_dir.subVectors(center, controls.target))
-      controls.target.copy(center)
-      controls.update()
+      // Highlight only — clicking to inspect must not move the camera. Use the arrow keys /
+      // ◀ ▶ to recenter on a machine (focusSelected).
     } else {
       selectionBox.visible = false
     }
@@ -382,6 +405,7 @@ export function createScene(container: HTMLElement): SceneHandle {
     setSelected,
     focusSelected,
     setElevation,
+    resetView,
     dispose() {
       cancelAnimationFrame(raf)
       ro.disconnect()
