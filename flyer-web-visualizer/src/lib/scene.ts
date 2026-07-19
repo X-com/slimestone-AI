@@ -51,6 +51,9 @@ export function createScene(container: HTMLElement): SceneHandle {
   labelRenderer.domElement.style.top = '0'
   labelRenderer.domElement.style.left = '0'
   labelRenderer.domElement.style.pointerEvents = 'none' // labels re-enable per element
+  // Labels sit in a separate DOM overlay from the canvas, so OrbitControls' own contextmenu
+  // suppression (bound to renderer.domElement) never sees right-clicks that land on a badge.
+  labelRenderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault())
   container.appendChild(labelRenderer.domElement)
 
   const controls = new OrbitControls(camera, renderer.domElement)
@@ -112,6 +115,9 @@ export function createScene(container: HTMLElement): SceneHandle {
   const pointer = new THREE.Vector2()
   const _tmp = new THREE.Vector3()
   const _dir = new THREE.Vector3()
+  const _bmin = new THREE.Vector3()
+  const _bmax = new THREE.Vector3()
+  const _sz = new THREE.Vector3()
 
   function clearMeshes() {
     for (const p of placed) {
@@ -207,19 +213,19 @@ export function createScene(container: HTMLElement): SceneHandle {
         list.push({ machine: m, matrix: dummy.matrix.clone() })
         byId.set(d.blockId, list)
 
-        mBox.expandByPoint(new THREE.Vector3(wx - 0.5, wy - 0.5, wz - 0.5))
-        mBox.expandByPoint(new THREE.Vector3(wx + 0.5, wy + 0.5, wz + 0.5))
+        mBox.expandByPoint(_bmin.set(wx - 0.5, wy - 0.5, wz - 0.5))
+        mBox.expandByPoint(_bmax.set(wx + 0.5, wy + 0.5, wz + 0.5))
       }
 
       // Hash / id label above the machine.
       const el = document.createElement('div')
       el.className = 'machine-label'
-      el.textContent = m.label ?? m.hash.slice(0, 8) + '…'
+      el.textContent = m.label ?? `#${m.candidate.id}`
       el.title = m.source ? `${m.source}  #${m.candidate.id}` : m.hash
       el.style.pointerEvents = 'auto'
       el.addEventListener('click', (e) => {
         e.stopPropagation()
-        onSelectCb(m)
+        selectAndFocus(m)
       })
       const label = new CSS2DObject(el)
       label.position.set(gx, mBox.max.y + 1.2, gz)
@@ -323,13 +329,38 @@ export function createScene(container: HTMLElement): SceneHandle {
     if (hit) {
       selectionBox.box.copy(hit.box)
       selectionBox.visible = true
-      // Highlight only — clicking to inspect must not move the camera. Use the arrow keys /
-      // ◀ ▶ to recenter on a machine (focusSelected).
     } else {
       selectionBox.visible = false
     }
     for (const p of placed)
       p.label.element.classList.toggle('selected', p.machine.hash === hash)
+  }
+
+  // Zoom-fit the camera on a clicked machine: keep the current look direction, just move the
+  // target + distance so the whole machine fills the view. Arrow-key stepping uses focusSelected
+  // instead, which deliberately preserves zoom while gliding between machines.
+  function zoomToMachine(hash: string) {
+    const hit = placed.find((p) => p.machine.hash === hash)
+    if (!hit) return
+    const center = hit.box.getCenter(_tmp)
+    const size = hit.box.getSize(_sz)
+    const radius = 0.5 * size.length() + 0.75 // half-diagonal + margin
+    const vHalf = (camera.fov * Math.PI) / 360
+    const hHalf = Math.atan(Math.tan(vHalf) * Math.max(0.0001, camera.aspect))
+    const fitDist = radius / Math.sin(Math.max(0.01, Math.min(vHalf, hHalf)))
+    _dir.copy(camera.position).sub(controls.target)
+    if (_dir.lengthSq() < 1e-6) _dir.set(0.5, 0.9, 0.75) // camera was exactly at target
+    _dir.setLength(Math.max(fitDist, 2))
+    controls.target.copy(center)
+    camera.position.copy(center).add(_dir)
+    controls.update()
+  }
+
+  // Click-to-select entry point (badge click + raycast pick both funnel through here) — selects
+  // and, unlike arrow-key nav, zoom-fits the camera on the clicked machine.
+  function selectAndFocus(m: Machine | null) {
+    onSelectCb(m)
+    if (m) zoomToMachine(m.hash)
   }
 
   // Click-to-pick (ignore orbit/pan drags).
@@ -351,9 +382,9 @@ export function createScene(container: HTMLElement): SceneHandle {
     const hit = hits[0]
     if (hit && hit.instanceId != null) {
       const machines = hit.object.userData.machines as Machine[]
-      onSelectCb(machines[hit.instanceId] ?? null)
+      selectAndFocus(machines[hit.instanceId] ?? null)
     } else {
-      onSelectCb(null)
+      selectAndFocus(null)
     }
   })
 

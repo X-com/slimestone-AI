@@ -2,9 +2,10 @@
   import { onMount } from 'svelte'
   import { loadMachines, loadComplexMachines, parseCompactData, type Machine } from './lib/data'
   import { createScene, type SceneHandle } from './lib/scene'
+  import MachineDetailPanel from './lib/MachineDetailPanel.svelte'
 
-  const PAGE = 100
-  const UPLOAD_CAP = 100 // cap rendered uploads: one DOM label per machine gets heavy past this
+  const PAGE = 25
+  const UPLOAD_CAP = 25 // cap rendered uploads: one DOM label per machine gets heavy past this
 
   let container: HTMLDivElement
   let handle: SceneHandle | null = null
@@ -104,6 +105,15 @@
     handle?.focusSelected(visible[next].hash)
   }
 
+  // Type a 1-based index (up to PAGE) to jump straight to that machine.
+  function selectIndex(oneIndexed: number) {
+    if (!visible.length) return
+    const idx = Math.min(visible.length, Math.max(1, Math.round(oneIndexed) || 1)) - 1
+    selected = visible[idx]
+    handle?.focusSelected(visible[idx].hash)
+  }
+  const selectedIndex = $derived(selected ? visible.findIndex((m) => m.hash === selected!.hash) + 1 : 0)
+
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
@@ -188,7 +198,7 @@
 
   {#if tab === 'examples'}
   <div class="flex gap-1">
-    {#each [['first', 'First 100'], ['last', 'Last 100'], ['random', 'Random 100']] as [m, label] (m)}
+    {#each [['first', `First ${PAGE}`], ['last', `Last ${PAGE}`], ['random', `Random ${PAGE}`]] as [m, label] (m)}
       <button
         class="rounded px-2.5 py-1 text-xs font-medium transition
           {mode === m
@@ -275,54 +285,21 @@
     title="Next machine (→)"
     onclick={() => selectDelta(1)}>▶</button
   >
-  <span class="px-1 text-[10px] text-slate-500">◀ ▶ machines · drag = orbit</span>
+  {#if visible.length}
+    <input
+      type="number"
+      min="1"
+      max={visible.length}
+      placeholder="#"
+      class="w-10 rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-center text-slate-200"
+      value={selectedIndex || ''}
+      onchange={(e) => selectIndex(Number((e.currentTarget as HTMLInputElement).value))}
+      aria-label="Jump to machine"
+    />
+    <span class="text-slate-500">/ {visible.length}</span>
+  {/if}
+  <span class="px-1 text-[10px] text-slate-500">◀ ▶ machines · type # · drag = orbit</span>
 </div>
 
 <!-- Detail panel -->
-{#if selected}
-  {@const c = selected.candidate}
-  {@const r = selected.result}
-  <aside
-    class="absolute right-0 top-0 h-full w-80 max-w-[85vw] overflow-y-auto bg-slate-900/95 p-4 text-sm text-slate-200 shadow-xl"
-  >
-    <div class="mb-3 flex items-start justify-between gap-2">
-      <h2 class="font-semibold">Machine</h2>
-      <button
-        class="rounded px-2 py-0.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-        onclick={() => (selected = null)}>✕</button
-      >
-    </div>
-    <dl class="space-y-2">
-      {#if selected.source}
-        <div>
-          <dt class="text-xs uppercase text-slate-500">source</dt>
-          <dd class="break-all font-mono text-xs text-cyan-300">{selected.source}</dd>
-        </div>
-      {:else}
-        <div>
-          <dt class="text-xs uppercase text-slate-500">id</dt>
-          <dd class="break-all font-mono text-xs text-cyan-300">{selected.hash}</dd>
-        </div>
-      {/if}
-      {#each [['index', c.id], ['blocks', selected.block_count], ['trigger', `x${c.trigger.x} y${c.trigger.y} z${c.trigger.z}`]] as [k, v] (k)}
-        <div class="flex justify-between gap-3">
-          <dt class="text-xs uppercase text-slate-500">{k}</dt>
-          <dd class="text-right font-mono text-xs">{v}</dd>
-        </div>
-      {/each}
-      {#if r}
-        {#each [['generation', selected.generation], ['origin', selected.origin], ['ticks', r.ticks], ['period', `${r.period} ticks`], ['shift (flight)', `x${r.shift.x} y${r.shift.y} z${r.shift.z}`], ['found', selected.found_at.slice(0, 19).replace('T', ' ')]] as [k, v] (k)}
-          <div class="flex justify-between gap-3">
-            <dt class="text-xs uppercase text-slate-500">{k}</dt>
-            <dd class="text-right font-mono text-xs">{v}</dd>
-          </div>
-        {/each}
-      {:else}
-        <p class="pt-1 text-xs text-slate-500">
-          {selected.origin === 'complex' ? 'Example machine' : 'Uploaded .data'} — no
-          simulation metadata.
-        </p>
-      {/if}
-    </dl>
-  </aside>
-{/if}
+<MachineDetailPanel machine={selected} onClose={() => (selected = null)} />
