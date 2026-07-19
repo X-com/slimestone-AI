@@ -6,6 +6,7 @@ from pathlib import Path
 import rl_ml  # noqa: F401  (sys.path shim for genetic_ml, must run before the imports below)
 from genetic_ml.blocks import BLOCK_SLIME
 from genetic_ml.candidate_io import load_candidates_from_glob
+from genetic_ml.compact_format import read_compact_file
 from genetic_ml.compact_working_writer import CompactWorkingWriter
 from genetic_ml.config import SimulatorRunConfig, simulator_exe_name
 from genetic_ml.dev_tls import build_ssl_context
@@ -85,8 +86,20 @@ def _feature_count(task: Task, base_machines: list[dict], rng: random.Random) ->
 def main() -> None:
     rng = random.Random(RNG_SEED)
 
-    seeds = load_candidates_from_glob(WORKING_DIR / "*.json")
-    print(f"Loaded {len(seeds)} base machine(s) from {WORKING_DIR}")
+    # Compact-working discoveries are included as seeds too (not just data/working/*.json) -
+    # otherwise the candidate space is permanently capped at whatever the hand-picked seed
+    # machines can reach: sample_contexts() only ever considers positions next to blocks already
+    # in base_machines, so once every (machine, position) combination has been simulated once
+    # (recorded in working_hashes/not_working_hashes), every later attempt is a cache hit and
+    # sims/sec stays at 0 forever. Feeding discoveries back in as new seeds keeps growing the
+    # reachable position set as new machines are found - same as main_ga.py already does.
+    json_seeds = load_candidates_from_glob(WORKING_DIR / "*.json")
+    compact_seeds = read_compact_file(COMPACT_DIR / "flyers.data")
+    seeds = json_seeds + compact_seeds
+    print(
+        f"Loaded {len(seeds)} base machine(s) "
+        f"({len(json_seeds)} from {WORKING_DIR}, {len(compact_seeds)} from {COMPACT_DIR})"
+    )
 
     if RESUME and CHECKPOINT_PATH.exists():
         policy = SharedLinearPolicy.load(CHECKPOINT_PATH)

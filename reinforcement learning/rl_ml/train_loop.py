@@ -51,7 +51,9 @@ def _simulate_rewards(
 
     stats: optional output param - if given, stats["simulated"] is incremented by the number of
     candidates that actually went through pool.run_all() this call (excludes cache hits and
-    action=False no-ops), so a caller can track real simulator throughput across calls.
+    action=False no-ops), and stats["new_working"] collects every newly-discovered working
+    candidate from this call (accumulates across calls - the caller is responsible for clearing
+    it), so a caller can track real simulator throughput and pull out fresh seeds.
 
     working_hashes/not_working_hashes, if given, are checked before simulating each candidate: a
     shape whose canonical hash was already tried (in this run or an earlier one) skips the
@@ -97,6 +99,8 @@ def _simulate_rewards(
 
     if stream_hub is not None and new_working:
         stream_hub.publish(b"".join(encode_candidate(c) for c in new_working))
+    if stats is not None and new_working:
+        stats.setdefault("new_working", []).extend(new_working)
 
     return rewards
 
@@ -149,6 +153,12 @@ def train(
     that a count-based interval floods the terminal. Always printed immediately on iteration 1 so a
     run doesn't look stalled right after starting."""
     rng = rng if rng is not None else random.Random()
+    # Local copy, grown in place as new working machines are discovered (see sim_stats below) -
+    # otherwise sample_contexts() only ever draws from the machines passed in at call time, so a
+    # long-running (iterations=None) process exhausts its fixed candidate_positions() space and
+    # every action becomes a hash-log cache hit, with sims/sec staying at 0 for the rest of the
+    # run. Copying instead of mutating the caller's own list so this is invisible to the caller.
+    base_machines = list(base_machines)
     next_id = itertools.count(1)
     working_hashes = (
         HashLog(working_hashes_path, hash_bytes=32, flush_interval_seconds=flush_interval_seconds)
@@ -174,7 +184,7 @@ def train(
     window_episode_count = 0
     window_attempt_reward_sum = 0.0
     window_attempt_count = 0
-    sim_stats: dict[str, int] = {"simulated": 0}
+    sim_stats: dict[str, Any] = {"simulated": 0, "new_working": []}
 
     with SimulatorPool(simulator_config) as pool:
         try:
@@ -191,6 +201,9 @@ def train(
                     task, contexts, actions, pool, next_id, working_writer, working_hashes, not_working_hashes,
                     stream_hub, sim_stats,
                 )
+                if sim_stats["new_working"]:
+                    base_machines.extend(sim_stats["new_working"])
+                    sim_stats["new_working"] = []
 
                 for feature, action, reward in zip(feats, actions, rewards):
                     window_p_sum += policy.probability(feature)
@@ -225,7 +238,8 @@ def train(
                         f"({window_attempt_count} attempts this window) "
                         f"sims/sec={sims_per_second:.1f} "
                         f"action_success_rate={success_rate:.2f} "
-                        f"({total_true_successes}/{total_true_actions} actions succeeded)"
+                        f"({total_true_successes}/{total_true_actions} actions succeeded) "
+                        f"seeds={len(base_machines)}"
                     )
                     window_started = now
                     window_p_sum = 0.0
