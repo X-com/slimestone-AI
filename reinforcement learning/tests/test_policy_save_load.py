@@ -62,6 +62,23 @@ def test_entropy_bonus_pulls_a_confident_weight_toward_zero_on_a_neutral_batch()
     assert policy.weights[0] < 5.0
 
 
+def test_update_gradient_ignores_the_sampling_floor_and_still_self_limits():
+    # min_probability keeps SAMPLING from collapsing (see the next test), but the update()
+    # gradient must use the true (unclamped) probability - otherwise a small systematic bias
+    # (e.g. one action being negative in expectation) never decays as weights grow, and keeps
+    # pushing in the same direction forever instead of naturally vanishing like a normal
+    # (unclamped) REINFORCE update does at saturated weights. Regression test for a bug where the
+    # floor leaked into update() and let weights diverge unboundedly (observed: -71546 after ~1M
+    # iterations in a real run).
+    policy = SharedLinearPolicy(feature_count=1, learning_rate=0.1, task_name="test", min_probability=0.02)
+    policy.weights = [-1000.0]  # raw sigmoid underflows to 0.0, far below the 0.02 floor
+    before = policy.weights[0]
+
+    policy.update([([1.0], False, 1.0)])
+
+    assert abs(policy.weights[0] - before) < 1e-6  # near-zero, not the ~0.1-scale update a floored p=0.02 would give
+
+
 def test_probability_never_collapses_below_the_floor_regardless_of_weights():
     policy = SharedLinearPolicy(feature_count=1, learning_rate=0.1, task_name="test", min_probability=0.02)
     policy.weights = [-1000.0]  # deeply saturated - sigmoid alone would underflow to 0.0

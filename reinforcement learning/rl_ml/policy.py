@@ -56,8 +56,21 @@ class SharedLinearPolicy:
     def _logit(self, features: list[float]) -> float:
         return sum(w * f for w, f in zip(self.weights, features))
 
+    def _raw_probability(self, features: list[float]) -> float:
+        """Unclamped sigmoid - the model's actual belief, used only where the REINFORCE math
+        needs the true pi_theta(a|s) (the gradient in update()). Clamping THIS would make the
+        log-derivative gradient wrong, not just the exploration behavior - see probability()."""
+        return _sigmoid(self._logit(features))
+
     def probability(self, features: list[float]) -> float:
-        p = _sigmoid(self._logit(features))
+        """Clamped to [min_probability, 1-min_probability] - used for actual action sampling
+        (sample()/greedy()), never for the update() gradient (see _raw_probability). Keeping the
+        clamp out of the gradient matters: earlier this clamp was applied there too, which made
+        (action - p) stop responding to how extreme the underlying logit actually was, so a small
+        systematic bias (e.g. one action being negative in expectation) never naturally decayed as
+        weights grew - it kept pushing in the same direction forever instead of self-limiting via
+        the same sigmoid saturation that naturally caps a normal (unclamped) REINFORCE update."""
+        p = self._raw_probability(features)
         return min(max(p, self.min_probability), 1.0 - self.min_probability)
 
     def sample(self, features: list[float], rng: random.Random) -> bool:
@@ -92,7 +105,7 @@ class SharedLinearPolicy:
 
         for (features, action, reward), raw_advantage in zip(episodes, raw_advantages):
             advantage = raw_advantage / norm
-            p = self.probability(features)
+            p = self._raw_probability(features)
             policy_grad = advantage * ((1.0 if action else 0.0) - p)
             grad_scale = self.learning_rate * (policy_grad + self.entropy_coef * _entropy_gradient(p))
             for i, feature in enumerate(features):

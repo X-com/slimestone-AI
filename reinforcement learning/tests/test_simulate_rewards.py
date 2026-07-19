@@ -200,12 +200,39 @@ def test_failed_and_cache_hit_candidates_never_publish():
     )
     assert hub.frames == []
 
-    candidate = task.build_candidate(context, True, candidate_id=1)
-    working_hashes = _bare_hash_log(hash_bytes=32)
-    working_hashes._seen = {bytes.fromhex(canonical_hash(candidate))}
+
+def test_stats_reports_simulated_count_and_collects_new_working_candidates():
+    task = DummyTask()
+    contexts = [
+        DummyContext(machine=_MACHINE, position=(1, 0, 0)),
+        DummyContext(machine=_MACHINE, position=(2, 0, 0)),
+    ]
+    pool = _StubPool({1: {"validCycle": True}, 2: {"validCycle": False}})
+    stats: dict = {}
 
     _simulate_rewards(
-        task, [context], [True], _ExplodingPool(), itertools.count(1), working_writer=None,
-        working_hashes=working_hashes, stream_hub=hub,
+        task, contexts, [True, True], pool, itertools.count(1), working_writer=None,
+        working_hashes=_bare_hash_log(hash_bytes=32), not_working_hashes=_bare_hash_log(hash_bytes=8),
+        stats=stats,
     )
-    assert hub.frames == []
+
+    assert stats["simulated"] == 2  # both actually reached pool.run_all(), neither was a cache hit
+    assert [c["id"] for c in stats["new_working"]] == [1]  # only the validCycle=True one
+
+
+def test_stats_new_working_accumulates_across_repeated_calls_on_the_same_dict():
+    task = DummyTask()
+    context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
+    stats: dict = {}
+    next_id = itertools.count(1)
+
+    _simulate_rewards(
+        task, [context], [True], _StubPool({1: {"validCycle": True}}), next_id, working_writer=None,
+        working_hashes=_bare_hash_log(hash_bytes=32), stats=stats,
+    )
+    _simulate_rewards(
+        task, [context], [True], _StubPool({2: {"validCycle": True}}), next_id, working_writer=None,
+        working_hashes=_bare_hash_log(hash_bytes=32), stats=stats,
+    )
+
+    assert len(stats["new_working"]) == 2  # caller (train_loop.train) is responsible for clearing it
