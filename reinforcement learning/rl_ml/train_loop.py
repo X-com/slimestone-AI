@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import itertools
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ def _simulate_rewards(
     working_hashes: HashLog | None = None,
     not_working_hashes: HashLog | None = None,
     stream_hub: Any = None,
+    stats: dict[str, int] | None = None,
 ) -> list[float]:
     """Builds candidates for every action, runs them through pool.run_all() in one batch, and
     returns one reward per context (in context order). A newly-discovered distinct working
@@ -46,6 +48,10 @@ def _simulate_rewards(
     StreamHub. Optional; None skips this. Every newly-discovered working candidate from this call
     is encoded and published as a single batch frame, so a connected /live dashboard sees the
     same discoveries working_writer just persisted.
+
+    stats: optional output param - if given, stats["simulated"] is incremented by the number of
+    candidates that actually went through pool.run_all() this call (excludes cache hits and
+    action=False no-ops), so a caller can track real simulator throughput across calls.
 
     working_hashes/not_working_hashes, if given, are checked before simulating each candidate: a
     shape whose canonical hash was already tried (in this run or an earlier one) skips the
@@ -69,6 +75,8 @@ def _simulate_rewards(
         to_simulate.append((i, candidate, candidate_hash))
 
     results = pool.run_all([candidate for _, candidate, _ in to_simulate]) if to_simulate else []
+    if stats is not None:
+        stats["simulated"] = stats.get("simulated", 0) + len(to_simulate)
 
     rewards = [task.reward_of(actions[i], None) for i in range(len(contexts))]
     for i, reward in cache_hit_rewards.items():
@@ -102,7 +110,7 @@ def train(
     batch_size: int,
     checkpoint_path: str | Path | None = None,
     checkpoint_every: int = 20,
-    progress_every: int = 10,
+    progress_interval_seconds: float = 15.0,
     rng: random.Random | None = None,
     working_writer: Any = None,
     working_hashes_path: str | Path | None = None,
@@ -133,7 +141,13 @@ def train(
     iterations: None runs indefinitely until interrupted (Ctrl+C) instead of stopping after a fixed
     count - same convention as genetic_ml.ga_loop.GAConfig.generations. Either way, a KeyboardInterrupt
     stops the loop gracefully and still flushes the checkpoint/hash logs/working_writer before
-    returning, so an interrupted continuous run doesn't lose buffered discoveries."""
+    returning, so an interrupted continuous run doesn't lose buffered discoveries.
+
+    progress_interval_seconds caps how often the status line prints (minimum wall-clock gap between
+    printouts, same convention as genetic_ml.ga_loop.GAConfig.progress_interval_seconds) rather than
+    every fixed number of iterations - a fast simulator pool can chew through iterations fast enough
+    that a count-based interval floods the terminal. Always printed immediately on iteration 1 so a
+    run doesn't look stalled right after starting."""
     rng = rng if rng is not None else random.Random()
     next_id = itertools.count(1)
     working_hashes = (
@@ -152,6 +166,15 @@ def train(
     completed_iterations = 0
     iteration_label = "inf" if iterations is None else str(iterations)
     iteration_iter = itertools.count(1) if iterations is None else range(1, iterations + 1)
+    last_printed = 0.0  # 0 forces an immediate first printout on iteration 1
+    # Reset every printout so the reported averages reflect the current window instead of a
+    # lifetime average - mirrors genetic_ml.ga_loop's windowed profiling stats.
+    window_started = time.monotonic()
+    window_p_sum = 0.0
+    window_episode_count = 0
+    window_attempt_reward_sum = 0.0
+    window_attempt_count = 0
+    sim_stats: dict[str, int] = {"simulated": 0}
 
     with SimulatorPool(simulator_config) as pool:
         try:
@@ -166,12 +189,16 @@ def train(
 
                 rewards = _simulate_rewards(
                     task, contexts, actions, pool, next_id, working_writer, working_hashes, not_working_hashes,
-                    stream_hub,
+                    stream_hub, sim_stats,
                 )
 
-                for action, reward in zip(actions, rewards):
+                for feature, action, reward in zip(feats, actions, rewards):
+                    window_p_sum += policy.probability(feature)
+                    window_episode_count += 1
                     if action:
                         total_true_actions += 1
+                        window_attempt_reward_sum += reward
+                        window_attempt_count += 1
                         if reward > 0:
                             total_true_successes += 1
 
@@ -180,14 +207,32 @@ def train(
                 if checkpoint_path is not None and iteration % checkpoint_every == 0:
                     policy.save(checkpoint_path)
 
-                if iteration % progress_every == 0 or iteration == iterations:
-                    mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
+                now = time.monotonic()
+                if now - last_printed >= progress_interval_seconds or iteration == iterations:
+                    last_printed = now
                     success_rate = total_true_successes / total_true_actions if total_true_actions else 0.0
+                    mean_p = window_p_sum / window_episode_count if window_episode_count else 0.0
+                    mean_reward_on_attempts = (
+                        f"{window_attempt_reward_sum / window_attempt_count:.2f}"
+                        if window_attempt_count
+                        else "n/a"
+                    )
+                    window_seconds = now - window_started
+                    sims_per_second = sim_stats["simulated"] / window_seconds if window_seconds > 0 else 0.0
                     print(
-                        f"iter={iteration}/{iteration_label} mean_reward={mean_reward:.2f} "
+                        f"iter={iteration}/{iteration_label} mean_p={mean_p:.3f} "
+                        f"mean_reward_on_attempts={mean_reward_on_attempts} "
+                        f"({window_attempt_count} attempts this window) "
+                        f"sims/sec={sims_per_second:.1f} "
                         f"action_success_rate={success_rate:.2f} "
                         f"({total_true_successes}/{total_true_actions} actions succeeded)"
                     )
+                    window_started = now
+                    window_p_sum = 0.0
+                    window_episode_count = 0
+                    window_attempt_reward_sum = 0.0
+                    window_attempt_count = 0
+                    sim_stats["simulated"] = 0
         except KeyboardInterrupt:
             print(f"\nInterrupted after {completed_iterations} iteration(s) - stopping gracefully...")
         finally:

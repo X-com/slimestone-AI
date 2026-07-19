@@ -62,6 +62,14 @@ def test_entropy_bonus_pulls_a_confident_weight_toward_zero_on_a_neutral_batch()
     assert policy.weights[0] < 5.0
 
 
+def test_probability_never_collapses_below_the_floor_regardless_of_weights():
+    policy = SharedLinearPolicy(feature_count=1, learning_rate=0.1, task_name="test", min_probability=0.02)
+    policy.weights = [-1000.0]  # deeply saturated - sigmoid alone would underflow to 0.0
+
+    assert policy.probability([1.0]) == 0.02
+    assert policy.probability([-1.0]) == 0.98  # symmetric ceiling on the other side
+
+
 def test_save_load_round_trips_weights_and_metadata(tmp_path):
     policy = SharedLinearPolicy(feature_count=2, learning_rate=0.3, task_name="dummy")
     policy.update([([1.0, 0.0], True, 1.0), ([0.0, 1.0], False, 0.0)])

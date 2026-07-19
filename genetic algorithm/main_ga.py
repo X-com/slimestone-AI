@@ -43,7 +43,7 @@ STREAM_PORT = 8765
 # True serves wss:// with an auto-generated local TLS cert (see genetic_ml/dev_tls.py) - matches
 # the frontend's default wss://localhost:8765. False serves plain ws:// (edit the frontend's URL
 # box to match if you flip this).
-STREAM_TLS = True
+STREAM_TLS = False
 
 # How often buffered records get written to disk in one batch, in seconds - applies to both
 # hash logs and, in "compact" mode, flyers.data (see genetic_ml/hash_log.py,

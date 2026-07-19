@@ -45,7 +45,7 @@ STREAM_PORT = 8765
 # True serves wss:// with an auto-generated local TLS cert (see genetic_ml/dev_tls.py) - matches
 # the frontend's default wss://localhost:8765. False serves plain ws:// (edit the frontend's URL
 # box to match if you flip this).
-STREAM_TLS = True
+STREAM_TLS = False
 # How often CompactWorkingWriter/HashLog write their buffered records to disk in one batch, in
 # seconds. A graceful exit (Ctrl+C or normal completion) always flushes everything regardless of
 # this value - it only controls how often mid-run writes happen.
@@ -67,12 +67,12 @@ BATCH_SIZE = 16
 ITERATIONS: int | None = None
 LEARNING_RATE = 0.1
 CHECKPOINT_EVERY = 20
-PROGRESS_EVERY = 10
+PROGRESS_INTERVAL_SECONDS = 5.0
 RNG_SEED = 1667
 
 # If True and CHECKPOINT_PATH already exists, resume training from its saved weights/iteration
 # count instead of starting a fresh policy.
-RESUME = False
+RESUME = True
 
 
 def _feature_count(task: Task, base_machines: list[dict], rng: random.Random) -> int:
@@ -121,7 +121,7 @@ def main() -> None:
         batch_size=BATCH_SIZE,
         checkpoint_path=CHECKPOINT_PATH,
         checkpoint_every=CHECKPOINT_EVERY,
-        progress_every=PROGRESS_EVERY,
+        progress_interval_seconds=PROGRESS_INTERVAL_SECONDS,
         rng=rng,
         working_writer=working_writer,
         working_hashes_path=str(WORKING_HASHES),

@@ -35,11 +35,20 @@ class SharedLinearPolicy:
         learning_rate: float = 0.1,
         task_name: str = "unknown",
         entropy_coef: float = 0.01,
+        min_probability: float = 0.02,
     ) -> None:
         self.weights: list[float] = [0.0] * feature_count
         self.learning_rate = learning_rate
         self.task_name = task_name
         self.entropy_coef = entropy_coef
+        # Floor/ceiling on the sampled probability, applied after the sigmoid - a reward function
+        # that's negative in expectation for one action (e.g. most attachment attempts break the
+        # machine) drives that action's logit further negative every step, and once sigmoid(logit)
+        # underflows toward 0 BOTH the policy gradient and the entropy bonus vanish with it (each
+        # scales with p or p*(1-p)) - a numerical trap with no way back. Clamping guarantees a
+        # non-zero sampling/gradient signal no matter how extreme the weights get, same idea as
+        # epsilon-greedy.
+        self.min_probability = min_probability
         self.iteration = 0
         self._baseline = 0.0
         self._baseline_count = 0
@@ -48,7 +57,8 @@ class SharedLinearPolicy:
         return sum(w * f for w, f in zip(self.weights, features))
 
     def probability(self, features: list[float]) -> float:
-        return _sigmoid(self._logit(features))
+        p = _sigmoid(self._logit(features))
+        return min(max(p, self.min_probability), 1.0 - self.min_probability)
 
     def sample(self, features: list[float], rng: random.Random) -> bool:
         return rng.random() < self.probability(features)
@@ -103,6 +113,7 @@ class SharedLinearPolicy:
             "iteration": self.iteration,
             "learning_rate": self.learning_rate,
             "entropy_coef": self.entropy_coef,
+            "min_probability": self.min_probability,
             "baseline": self._baseline,
             "baseline_count": self._baseline_count,
         }
@@ -116,6 +127,7 @@ class SharedLinearPolicy:
             learning_rate=payload["learning_rate"],
             task_name=payload["task"],
             entropy_coef=payload.get("entropy_coef", 0.01),
+            min_probability=payload.get("min_probability", 0.02),
         )
         policy.weights = list(payload["weights"])
         policy.iteration = payload["iteration"]

@@ -1,4 +1,5 @@
 genetic algorithm/data/
+reinforcement learning/data/
 data/dev-certs/
 **/__pycache__
 **/build
