@@ -110,8 +110,17 @@ private:
     std::int64_t triggerEndTick_ = -1;
     bool triggerDisabled_ = false;
 
+    // Structural (piston-usage) verification - alternative to burnout/compareFinalToInitial,
+    // toggled by MCP1122_CPP_STRUCTURAL_VERIFY (see Simulator::simulate). Only touched/consulted
+    // when structuralVerifyEnabled_ is true.
+    bool structuralVerifyEnabled_ = false;
+    std::unordered_set<std::uint64_t> validPistons_;  // positions of pistons not yet "spent"
+    std::unordered_set<std::uint64_t> unmovedBlocks_;  // original blocks never yet displaced
+    bool structuralShortCircuited_ = false;
+
     void loadCandidate(const Candidate& candidate);
     void trigger(BlockPos pos);
+    bool triggerStructural(BlockPos pos);
     void tickWorld();
     void tickScheduledUpdates();
     void observerUpdateTick(BlockPos pos, std::uint32_t state);

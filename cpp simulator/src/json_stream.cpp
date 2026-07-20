@@ -1,5 +1,6 @@
 #include "json_stream.h"
 
+#include <cstdlib>
 #include <stdexcept>
 
 namespace mcp1122 {
@@ -11,7 +12,22 @@ namespace {
 // crashes on negative y, so all three engines apply this identical offset for consistency.
 // Nothing un-shifts it back: results (working/period/shift/ticks) are offset-invariant since
 // shift is a delta between two anchors, and trace logs simply show the raised coordinates.
-constexpr int kCandidateYOffset = 64;
+//
+// The simulator itself enforces the matching upper bound (Simulator::setBlockState/
+// scheduleUpdate silently no-op for y < 0 or y >= 256, mirroring the real engine's array
+// bounds) - so a candidate whose own real height already exceeds roughly 191 blocks (255 - 64)
+// gets its upper portion silently dropped once shifted, with no error, just wrong results. A
+// candidate that's already entirely non-negative doesn't need the offset at all;
+// MCP1122_CPP_NO_Y_OFFSET=1 skips it for exactly that case (verification/debugging only - a
+// candidate that genuinely has negative y still needs the default offset).
+int candidateYOffset() {
+    if (const char* env = std::getenv("MCP1122_CPP_NO_Y_OFFSET")) {
+        if (std::atoi(env) != 0) {
+            return 0;
+        }
+    }
+    return 64;
+}
 
 template <typename T>
 bool readRaw(std::istream& in, T& value) {
@@ -37,9 +53,10 @@ bool readCandidateCompact(std::istream& in, Candidate& out) {
         throw std::runtime_error("truncated compact candidate: header");
     }
 
+    int yOffset = candidateYOffset();
     out = Candidate{};
     out.id = id;
-    out.trigger = BlockPos{tx, ty + kCandidateYOffset, tz};
+    out.trigger = BlockPos{tx, ty + yOffset, tz};
     out.blocks.reserve(blockCount);
 
     for (std::uint32_t i = 0; i < blockCount; ++i) {
@@ -50,7 +67,7 @@ bool readCandidateCompact(std::istream& in, Candidate& out) {
         }
         BlockEntry block;
         block.x = x;
-        block.y = y + kCandidateYOffset;
+        block.y = y + yOffset;
         block.z = z;
         block.state = state;
         out.blocks.push_back(block);

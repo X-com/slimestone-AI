@@ -1,0 +1,8 @@
+{
+    "python.analysis.autoImportCompletions": true,
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.defaultInterpreterPath": "D:\\ProgramFiles\\Python313\\python.exe",
+    "code-runner.executorMap": {
+        "python": "\"D:\\ProgramFiles\\Python313\\python.exe\" -u"
+    }
+}

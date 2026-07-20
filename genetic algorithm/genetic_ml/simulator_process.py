@@ -47,6 +47,7 @@ class SimulatorProcess:
 
         env = os.environ.copy()
         env["MCP1122_CPP_MAX_TICKS"] = str(self.config.max_ticks)
+        env["MCP1122_CPP_STRUCTURAL_VERIFY"] = "1" if self.config.structural_verify else "0"
         _prepend_matching_runtime_dir(env)
 
         # Binary mode (no text=True/encoding) - candidates go to cpp's stdin as raw compact-
