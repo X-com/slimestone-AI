@@ -20,6 +20,95 @@ RED_STAINED_GLASS_META = 14
 STICKY_PISTON = 29
 PISTON = 33
 
+# Real schematics can use any wood species/material for blocks that behave identically in
+# the simulator (which only recognizes one id per behavior) - collapse every variant onto
+# a single canonical id here, at the source, rather than teaching the simulator every
+# real-world id. variant block id -> canonical block id.
+BLOCK_ID_ALIASES = {
+    # Iron trapdoor -> (wood) trapdoor: identical open/close behavior in the simulator,
+    # material only affects hardness (mining, not simulated).
+    167: 96,  # iron_trapdoor -> trapdoor
+
+    # Fence gates: all six wood species are the same BlockFenceGate behavior in vanilla
+    # (Material/texture is the only difference). 107 (oak) is the canonical id.
+    183: 107,  # spruce_fence_gate
+    184: 107,  # birch_fence_gate
+    185: 107,  # jungle_fence_gate
+    186: 107,  # dark_oak_fence_gate
+    187: 107,  # acacia_fence_gate
+
+    # Fences (not fence gates) and stairs: never specially recognized by the simulator,
+    # always just inert non-solid geometry regardless of material - collapsed onto glass.
+    85: 20,   # fence (oak)
+    113: 20,  # nether_brick_fence
+    188: 20,  # spruce_fence
+    189: 20,  # birch_fence
+    190: 20,  # jungle_fence
+    191: 20,  # dark_oak_fence
+    192: 20,  # acacia_fence
+    53: 20,   # oak_stairs
+    67: 20,   # stone_stairs
+    108: 20,  # brick_stairs
+    109: 20,  # stone_brick_stairs
+    114: 20,  # nether_brick_stairs
+    128: 20,  # sandstone_stairs
+    134: 20,  # spruce_stairs
+    135: 20,  # birch_stairs
+    136: 20,  # jungle_stairs
+    156: 20,  # quartz_stairs
+    163: 20,  # acacia_stairs
+    164: 20,  # dark_oak_stairs
+    180: 20,  # red_sandstone_stairs
+    203: 20,  # purpur_stairs
+
+    # Glazed terracotta: 16 colors, all identical opaque-cube behavior. 235 (white) is
+    # the canonical id.
+    236: 235,  # orange_glazed_terracotta
+    237: 235,  # magenta_glazed_terracotta
+    238: 235,  # light_blue_glazed_terracotta
+    239: 235,  # yellow_glazed_terracotta
+    240: 235,  # lime_glazed_terracotta
+    241: 235,  # pink_glazed_terracotta
+    242: 235,  # gray_glazed_terracotta
+    243: 235,  # silver_glazed_terracotta
+    244: 235,  # cyan_glazed_terracotta
+    245: 235,  # purple_glazed_terracotta
+    246: 235,  # blue_glazed_terracotta
+    247: 235,  # brown_glazed_terracotta
+    248: 235,  # green_glazed_terracotta
+    249: 235,  # red_glazed_terracotta
+    250: 235,  # black_glazed_terracotta
+
+    # Sandstone and concrete: plain opaque-cube blocks, no simulator-relevant difference
+    # from stone.
+    24: 1,    # sandstone
+    179: 1,   # red_sandstone
+    251: 1,   # concrete
+    252: 1,   # concrete_powder
+
+    # Stained glass -> glass. Red stained glass (meta 14) is the trigger-marker convention
+    # handled separately above (consumed before reaching this table), so any id 95 here is
+    # a real placed block, safe to flatten to plain glass.
+    95: 20,   # stained_glass
+
+    # Half slabs (single-height, non-full-cube) and glowstone: inert non-solid/decorative
+    # blocks, same bucket as fences/stairs above. Note nether brick's fence *gate* doesn't
+    # exist as a real block id in vanilla - only nether_brick_fence (113, already above).
+    44: 20,   # stone_slab
+    126: 20,  # wooden_slab
+    182: 20,  # stone_slab2 (red sandstone)
+    205: 20,  # purpur_slab
+    89: 20,   # glowstone
+
+    # Gold/diamond/iron blocks and log/log2 (all wood species): plain solid decorative
+    # blocks, no simulator-relevant behavior difference from stone.
+    41: 1,    # gold_block
+    42: 1,    # iron_block
+    57: 1,    # diamond_block
+    17: 1,    # log
+    162: 1,   # log2 (acacia/dark_oak)
+}
+
 # EnumFacing.values() order: DOWN, UP, NORTH, SOUTH, WEST, EAST
 FACING_OFFSETS = [(0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)]
 
@@ -121,6 +210,8 @@ def load_schematic(path):
                 if block_id == RED_STAINED_GLASS and meta == RED_STAINED_GLASS_META:
                     markers.append(pos)
                     continue
+
+                block_id = BLOCK_ID_ALIASES.get(block_id, block_id)
 
                 if 1 <= block_id <= 255:
                     blocks[pos] = block_id | (meta << 8)
