@@ -17,7 +17,18 @@ struct BlockData {
     float hardness = 0.0f;
     bool hasTileEntity = false;
     bool canProvidePower = false;
+    // Mirrors vanilla IBlockState.isNormalCube(): a full, opaque cube that does NOT itself
+    // provide power. Used by redstonePower() to decide strong-power (getStrongPower, sums
+    // all 6 neighbors) vs weak-power (the block's own facing) routing. A power source that
+    // happens to also be a full cube (observer, active detector rail) is deliberately
+    // excluded here so its own weak-power output isn't shadowed by this branch.
     bool isNormalCube = false;
+    // Mirrors vanilla IBlockState.isFullBlock() (material.blocksMovement() && isFullCube()):
+    // used only for physical support checks (isTopSolid, e.g. can a rail sit on top of this
+    // block). Unlike isNormalCube, this does NOT exclude power-providing full cubes like the
+    // observer - it sits on top of things and things sit on top of it just like any other
+    // solid block.
+    bool isFullBlock = false;
 };
 
 constexpr int BLOCK_AIR = 0;
@@ -27,6 +38,8 @@ constexpr int BLOCK_OBSIDIAN = 49;
 constexpr int BLOCK_RAIL = 66;
 constexpr int BLOCK_ACTIVATOR_RAIL = 157;
 constexpr int BLOCK_FENCE_GATE = 107;
+constexpr int BLOCK_TRAPDOOR = 96;
+constexpr int BLOCK_IRON_TRAPDOOR = 167;
 constexpr int BLOCK_STICKY_PISTON = 29;
 constexpr int BLOCK_PISTON = 33;
 constexpr int BLOCK_PISTON_HEAD = 34;
@@ -46,6 +59,13 @@ constexpr int RAIL_SHAPE_ASCENDING_EAST = 2;
 constexpr int RAIL_SHAPE_ASCENDING_WEST = 3;
 constexpr int RAIL_SHAPE_ASCENDING_NORTH = 4;
 constexpr int RAIL_SHAPE_ASCENDING_SOUTH = 5;
+// Curve shapes - only reachable on plain rail (BLOCK_RAIL), the only type whose Rail helper
+// runs with isPowered=false (BlockRailPowered/BlockRailDetector both pass isPowered=true,
+// which disables curve selection entirely - see BlockRailBase.Rail.place()/connectTo()).
+constexpr int RAIL_SHAPE_SOUTH_EAST = 6;
+constexpr int RAIL_SHAPE_SOUTH_WEST = 7;
+constexpr int RAIL_SHAPE_NORTH_WEST = 8;
+constexpr int RAIL_SHAPE_NORTH_EAST = 9;
 
 std::uint32_t makeState(int blockId, int meta);
 int blockId(std::uint32_t state);

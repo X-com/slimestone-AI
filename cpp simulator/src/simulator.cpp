@@ -55,7 +55,11 @@ Result Simulator::simulate(const Candidate& candidate) {
     try {
         loadCandidate(candidate);
 
-        structuralVerifyEnabled_ = false;
+        // Structural (piston-usage) verification is the default - flying-machine structures are
+        // designed around observer triggering, which only this path accepts (see
+        // Simulator::triggerStructural). Set MCP1122_CPP_STRUCTURAL_VERIFY=0 to opt back into the
+        // older burnout+settle+compareFinalToInitial method.
+        structuralVerifyEnabled_ = true;
         if (const char* env = std::getenv("MCP1122_CPP_STRUCTURAL_VERIFY")) {
             structuralVerifyEnabled_ = std::atoi(env) != 0;
         }
@@ -101,12 +105,27 @@ Result Simulator::simulate(const Candidate& candidate) {
                         // The three structural hooks (pistonEventReceived/doPistonMove) have
                         // already been live for the whole simulation via the same tickWorld()
                         // calls detectShiftCycle just made. A hash repeat alone means the cycle
-                        // is valid - the only failure mode is a short-circuit (a spent piston
-                        // pushing a block that had never moved before); a piston that never
-                        // fires at all (unrelated to the flight mechanism) is not a problem.
-                        result.settled = !structuralShortCircuited_;
+                        // is valid - the only failure modes are a short-circuit (a spent piston
+                        // pushing a block that had never moved before) or the structure ending up
+                        // with fewer rails than it started with. A rail losing support mid-move
+                        // (its supporting block briefly vacated while both are carried by the
+                        // same push) is normal and self-corrects once everything settles back
+                        // down - so this only looks at the rail count once, in the settled/
+                        // repeating state, not at the transient per-tick support checks. One-time
+                        // setup blocks a piston bores through on its first extension (a common,
+                        // legitimate bootstrap trick) are unaffected since only rails are counted.
+                        int finalRailCount = 0;
+                        for (const auto& e : world_.blocks.entries()) {
+                            if (isRailBlock(blockId(e.state))) ++finalRailCount;
+                        }
+                        bool railLost = finalRailCount < initialRailCount_;
+                        if (trace_ != nullptr) {
+                            trace_->log(world_, "dbg.railcnt", nullptr, initialRailCount_, finalRailCount);
+                        }
+                        result.settled = !structuralShortCircuited_ && !railLost;
                         result.finalShift = found->shift;
                         result.validCycle = result.settled;
+                        result.working = result.settled;
                     } else {
                         // Cycle confirmed: the trigger has done its job and burns out — it stops
                         // reacting to neighbor changes and stops emitting piston events, but the
@@ -451,6 +470,29 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
             std::uint32_t newState = setMetaBit(setMetaBit(state, 3, powered), 2, powered);
             setBlockState(pos, newState, 2);
         }
+    } else if (id == BLOCK_TRAPDOOR || id == BLOCK_IRON_TRAPDOOR) {
+        // mcp1122 BlockTrapDoor.neighborChanged: bit 2 is the OPEN flag (no separate
+        // "powered" bit like fence gate), toggled from live redstone power - but only
+        // re-synced when either currently powered, or the neighbor that triggered this
+        // notification is itself a power-capable block type. A neighbor change from a
+        // non-power block (e.g. a piston extending nearby, unrelated to redstone) while
+        // the trapdoor is unpowered is a no-op in vanilla; skipping it here too matters
+        // because a spurious close-on-every-notify can retrigger canPlaceRailAt/isTopSolid
+        // support checks on a rail sitting on top a tick earlier than real Minecraft would.
+        bool powered = isBlockPowered(pos);
+        bool canProvide = blockData(sourceBlockId).canProvidePower;
+        bool oldOpen = metaBit(state, 2);
+        if (powered || canProvide) {
+            bool changed = oldOpen != powered;
+            if (trace_ != nullptr) {
+                trace_->log(world_, "trap.nc", &pos, (powered ? 1 : 0) | (canProvide ? 2 : 0) | (oldOpen ? 4 : 0), changed ? 1 : 0);
+            }
+            if (changed) {
+                setBlockState(pos, setMetaBit(state, 2, powered), 2);
+            }
+        } else if (trace_ != nullptr) {
+            trace_->log(world_, "trap.nc", &pos, (powered ? 1 : 0) | (canProvide ? 2 : 0) | (oldOpen ? 4 : 0), 0);
+        }
     } else if (id == BLOCK_LIT_REDSTONE_LAMP) {
         // Lit lamp losing power turns off after a 4-tick scheduled delay (mcp1122
         // BlockRedstoneLight.neighborChanged). The actual turn-off happens in lampUpdateTick.
@@ -617,7 +659,16 @@ bool Simulator::isTopSolid(BlockPos pos) const {
         // as a solid top; an extended piston facing any other way does not.
         return !metaBit(state, 3) || facingMeta(state) == 0;
     }
-    return blockData(id).isNormalCube;
+    if (id == BLOCK_PISTON_EXTENSION) {
+        // BlockPistonExtension.isTopSolid: the mid-move placeholder (every block a piston is
+        // currently pushing, not just the head) only counts as a solid top while it's moving
+        // straight up. A horizontally-pushed block sitting under an ascending rail is
+        // momentarily non-solid here — that's vanilla behavior, not a bug — but the SAME
+        // placeholder still counts as solid when facing UP (a vertical push), which matters
+        // once other pushed blocks settle out of order relative to what supports them.
+        return facingMeta(state) == 1; // UP
+    }
+    return blockData(id).isFullBlock;
 }
 
 bool Simulator::isBlockPowered(BlockPos pos) const {
@@ -723,9 +774,13 @@ void Simulator::railNeighborChanged(BlockPos pos, std::uint32_t state) {
 // never provides power to neighbors.
 void Simulator::updateRailPowerState(BlockPos pos, std::uint32_t state, int railId, int shape) {
     bool wasPowered = metaBit(state, 3);
-    bool nowPowered = isBlockPowered(pos)
-        || findPoweredRailSignal(railId, pos, state, true, 0)
-        || findPoweredRailSignal(railId, pos, state, false, 0);
+    bool direct = isBlockPowered(pos);
+    bool relayFwd = !direct && findPoweredRailSignal(railId, pos, state, true, 0);
+    bool relayBack = !direct && !relayFwd && findPoweredRailSignal(railId, pos, state, false, 0);
+    bool nowPowered = direct || relayFwd || relayBack;
+    if (trace_ != nullptr) {
+        trace_->logState(world_, "rail.upd", &pos, state, (wasPowered ? 1 : 0) | (direct ? 2 : 0) | (relayFwd ? 4 : 0) | (relayBack ? 8 : 0), nowPowered ? 1 : 0);
+    }
 
     if (nowPowered != wasPowered) {
         setBlockState(pos, setMetaBit(state, 3, nowPowered), 3);
@@ -809,6 +864,259 @@ bool Simulator::isSameRailWithPower(int railId, BlockPos pos, bool forward, int 
         return true;
     }
     return findPoweredRailSignal(railId, pos, state, forward, distance + 1);
+}
+
+namespace {
+// Compares only X/Z (matches BlockRailBase.Rail.isConnectedTo: BlockPos.getX()/getZ(), not Y -
+// a connection target found one block up or down still counts as "the same connection").
+bool railIsConnectedTo(const BlockPos conn[], int count, BlockPos target) {
+    for (int i = 0; i < count; ++i) {
+        if (conn[i].x == target.x && conn[i].z == target.z) return true;
+    }
+    return false;
+}
+
+// Mirrors the first-stage direction pick shared by Rail.place() and Rail.connectTo(): a
+// straight line wins when only one axis has a connection; a corner (curve-capable rail types
+// only) wins when exactly two perpendicular neighbors are connected and nothing on the
+// opposite sides is.
+int railPickStraightOrCorner(bool n, bool s, bool w, bool e, bool hasCurves) {
+    int dir = -1;
+    if (n || s) dir = RAIL_SHAPE_NORTH_SOUTH;
+    if (w || e) dir = RAIL_SHAPE_EAST_WEST;
+    if (hasCurves) {
+        if (s && e && !n && !w) dir = RAIL_SHAPE_SOUTH_EAST;
+        if (s && w && !n && !e) dir = RAIL_SHAPE_SOUTH_WEST;
+        if (n && w && !s && !e) dir = RAIL_SHAPE_NORTH_WEST;
+        if (n && e && !s && !w) dir = RAIL_SHAPE_NORTH_EAST;
+    }
+    return dir;
+}
+}  // namespace
+
+// Mirrors BlockRailBase.Rail.findRailAt: a rail at pos itself, else one directly above, else
+// one directly below (rails commonly sit adjacent across a one-block step).
+bool Simulator::railFindRailAt(BlockPos pos, BlockPos& outPos, int& outShape) const {
+    std::uint32_t state = world_.getBlock(pos);
+    int id = blockId(state);
+    if (isRailBlock(id)) {
+        outPos = pos;
+        outShape = railShape(id, state);
+        return true;
+    }
+    BlockPos up = offset(pos, facings()[1]);
+    state = world_.getBlock(up);
+    id = blockId(state);
+    if (isRailBlock(id)) {
+        outPos = up;
+        outShape = railShape(id, state);
+        return true;
+    }
+    BlockPos down = offset(pos, facings()[0]);
+    state = world_.getBlock(down);
+    id = blockId(state);
+    if (isRailBlock(id)) {
+        outPos = down;
+        outShape = railShape(id, state);
+        return true;
+    }
+    return false;
+}
+
+// Mirrors BlockRailBase.Rail.updateConnectedRails: the two neighbor positions a given shape
+// connects to (ascending shapes connect to one flat neighbor and one neighbor a block higher).
+void Simulator::railConnectedPositions(BlockPos pos, int shape, BlockPos out[2], int& count) const {
+    count = 0;
+    BlockPos north = offset(pos, facings()[2]);
+    BlockPos south = offset(pos, facings()[3]);
+    BlockPos west = offset(pos, facings()[4]);
+    BlockPos east = offset(pos, facings()[5]);
+    switch (shape) {
+        case RAIL_SHAPE_NORTH_SOUTH:
+            out[count++] = north; out[count++] = south;
+            break;
+        case RAIL_SHAPE_EAST_WEST:
+            out[count++] = west; out[count++] = east;
+            break;
+        case RAIL_SHAPE_ASCENDING_EAST:
+            out[count++] = west; out[count++] = offset(east, facings()[1]);
+            break;
+        case RAIL_SHAPE_ASCENDING_WEST:
+            out[count++] = offset(west, facings()[1]); out[count++] = east;
+            break;
+        case RAIL_SHAPE_ASCENDING_NORTH:
+            out[count++] = offset(north, facings()[1]); out[count++] = south;
+            break;
+        case RAIL_SHAPE_ASCENDING_SOUTH:
+            out[count++] = north; out[count++] = offset(south, facings()[1]);
+            break;
+        case RAIL_SHAPE_SOUTH_EAST:
+            out[count++] = east; out[count++] = south;
+            break;
+        case RAIL_SHAPE_SOUTH_WEST:
+            out[count++] = west; out[count++] = south;
+            break;
+        case RAIL_SHAPE_NORTH_WEST:
+            out[count++] = west; out[count++] = north;
+            break;
+        case RAIL_SHAPE_NORTH_EAST:
+            out[count++] = east; out[count++] = north;
+            break;
+        default:
+            break;
+    }
+}
+
+// Mirrors BlockRailBase.Rail.removeSoftConnections: keeps only connections that are mutual -
+// the neighbor found at each recorded connection position must itself currently connect back
+// to ownPos, otherwise the (stale) connection is dropped.
+void Simulator::railRemoveSoftConnections(BlockPos ownPos, BlockPos conn[], int& count) const {
+    BlockPos kept[2];
+    int out = 0;
+    for (int i = 0; i < count; ++i) {
+        BlockPos otherPos; int otherShape;
+        if (railFindRailAt(conn[i], otherPos, otherShape)) {
+            BlockPos otherConn[2]; int otherCount;
+            railConnectedPositions(otherPos, otherShape, otherConn, otherCount);
+            if (railIsConnectedTo(otherConn, otherCount, ownPos)) {
+                kept[out++] = otherPos;
+            }
+        }
+    }
+    count = out;
+    for (int i = 0; i < out; ++i) conn[i] = kept[i];
+}
+
+// Mirrors BlockRailBase.Rail.hasNeighborRail: is there a rail in direction dirPos (relative to
+// thisPos) that either already connects back to thisPos, or still has a free connection slot?
+bool Simulator::railHasNeighborRail(BlockPos thisPos, BlockPos dirPos) const {
+    BlockPos railPos; int shape;
+    if (!railFindRailAt(dirPos, railPos, shape)) return false;
+    BlockPos conn[2]; int count;
+    railConnectedPositions(railPos, shape, conn, count);
+    railRemoveSoftConnections(railPos, conn, count);
+    return railIsConnectedTo(conn, count, thisPos) || count != 2;
+}
+
+// Mirrors the ascending-shape upgrade shared by Rail.place() and Rail.connectTo(): a straight
+// shape climbs if a rail sits directly above the neighbor at the low end.
+int Simulator::railApplyAscending(int dir, BlockPos north, BlockPos south, BlockPos west, BlockPos east) const {
+    if (dir == RAIL_SHAPE_NORTH_SOUTH) {
+        if (isRailBlock(blockId(world_.getBlock(offset(north, facings()[1]))))) dir = RAIL_SHAPE_ASCENDING_NORTH;
+        if (isRailBlock(blockId(world_.getBlock(offset(south, facings()[1]))))) dir = RAIL_SHAPE_ASCENDING_SOUTH;
+    }
+    if (dir == RAIL_SHAPE_EAST_WEST) {
+        if (isRailBlock(blockId(world_.getBlock(offset(east, facings()[1]))))) dir = RAIL_SHAPE_ASCENDING_EAST;
+        if (isRailBlock(blockId(world_.getBlock(offset(west, facings()[1]))))) dir = RAIL_SHAPE_ASCENDING_WEST;
+    }
+    if (dir < 0) dir = RAIL_SHAPE_NORTH_SOUTH;
+    return dir;
+}
+
+// Mirrors BlockRailBase.Rail.connectTo: recomputes a neighboring rail's own shape now that it
+// gains (or keeps) a connection to ownPos, and writes the result straight to the world -
+// exactly like the primary rail in railPlace, just without the further cascade (matching
+// vanilla, which does not recurse past one hop of neighbor reconnection).
+void Simulator::railConnectTo(BlockPos ownPos, const BlockPos existingConn[], int existingCount,
+                               BlockPos newTarget, bool hasCurves) {
+    BlockPos conn[2];
+    int count = existingCount;
+    for (int i = 0; i < existingCount && i < 2; ++i) conn[i] = existingConn[i];
+    if (count < 2) conn[count++] = newTarget;
+
+    BlockPos north = offset(ownPos, facings()[2]);
+    BlockPos south = offset(ownPos, facings()[3]);
+    BlockPos west = offset(ownPos, facings()[4]);
+    BlockPos east = offset(ownPos, facings()[5]);
+    bool n = railIsConnectedTo(conn, count, north);
+    bool s = railIsConnectedTo(conn, count, south);
+    bool w = railIsConnectedTo(conn, count, west);
+    bool e = railIsConnectedTo(conn, count, east);
+
+    int dir = railPickStraightOrCorner(n, s, w, e, hasCurves);
+    dir = railApplyAscending(dir, north, south, west, east);
+
+    std::uint32_t state = world_.getBlock(ownPos);
+    int id = blockId(state);
+    int mask = (id == BLOCK_RAIL) ? 0xF : 0x7;
+    std::uint32_t newState = makeState(id, (blockMeta(state) & ~mask) | dir);
+    setBlockState(ownPos, newState, 3);
+}
+
+// Mirrors BlockRailBase.Rail.place(): the full shape-selection algorithm run whenever a rail
+// is placed (here: whenever a piston settles a moved rail back into the world - see the
+// isRailBlock(newId) hook in setBlockState). poweredHint mirrors vanilla's own
+// worldIn.isBlockPowered(pos) argument to updateDir, used only as a last-resort corner-order
+// tiebreak when neighbor connections alone don't decide a direction.
+void Simulator::railPlace(BlockPos pos, bool poweredHint) {
+    std::uint32_t state = world_.getBlock(pos);
+    int id = blockId(state);
+    bool hasCurves = (id == BLOCK_RAIL);
+
+    BlockPos north = offset(pos, facings()[2]);
+    BlockPos south = offset(pos, facings()[3]);
+    BlockPos west = offset(pos, facings()[4]);
+    BlockPos east = offset(pos, facings()[5]);
+
+    bool n = railHasNeighborRail(pos, north);
+    bool s = railHasNeighborRail(pos, south);
+    bool w = railHasNeighborRail(pos, west);
+    bool e = railHasNeighborRail(pos, east);
+
+    int dir = railPickStraightOrCorner(n, s, w, e, hasCurves);
+
+    if (dir < 0) {
+        if (n || s) dir = RAIL_SHAPE_NORTH_SOUTH;
+        if (w || e) dir = RAIL_SHAPE_EAST_WEST;
+        if (hasCurves) {
+            if (poweredHint) {
+                if (s && e) dir = RAIL_SHAPE_SOUTH_EAST;
+                if (w && s) dir = RAIL_SHAPE_SOUTH_WEST;
+                if (e && n) dir = RAIL_SHAPE_NORTH_EAST;
+                if (n && w) dir = RAIL_SHAPE_NORTH_WEST;
+            } else {
+                if (n && w) dir = RAIL_SHAPE_NORTH_WEST;
+                if (e && n) dir = RAIL_SHAPE_NORTH_EAST;
+                if (w && s) dir = RAIL_SHAPE_SOUTH_WEST;
+                if (s && e) dir = RAIL_SHAPE_SOUTH_EAST;
+            }
+        }
+    }
+
+    dir = railApplyAscending(dir, north, south, west, east);
+
+    int mask = (id == BLOCK_RAIL) ? 0xF : 0x7;
+    std::uint32_t newState = makeState(id, (blockMeta(state) & ~mask) | dir);
+    // onBlockAdded always calls updateDir with initialPlacement=true (its only call site), so
+    // unlike vanilla's general Rail.place() this always writes and always cascades.
+    setBlockState(pos, newState, 3);
+
+    BlockPos conn[2]; int count;
+    railConnectedPositions(pos, dir, conn, count);
+    for (int i = 0; i < count; ++i) {
+        BlockPos otherPos; int otherShape;
+        if (!railFindRailAt(conn[i], otherPos, otherShape)) continue;
+        BlockPos otherConn[2]; int otherCount;
+        railConnectedPositions(otherPos, otherShape, otherConn, otherCount);
+        railRemoveSoftConnections(otherPos, otherConn, otherCount);
+        if (railIsConnectedTo(otherConn, otherCount, pos) || otherCount != 2) {
+            bool otherHasCurves = blockId(world_.getBlock(otherPos)) == BLOCK_RAIL;
+            railConnectTo(otherPos, otherConn, otherCount, pos, otherHasCurves);
+        }
+    }
+}
+
+// Mirrors BlockRailBase.onBlockAdded: recompute this rail's shape from live neighbors, then -
+// for power-carrying rail types only (golden/activator/detector; matches the vanilla "isPowered"
+// ctor flag, true for everything except plain rail) - immediately re-run neighborChanged so its
+// powered bit and support are consistent with the shape just chosen.
+void Simulator::railOnBlockAdded(BlockPos pos) {
+    bool poweredHint = isBlockPowered(pos);
+    railPlace(pos, poweredHint);
+    int id = blockId(world_.getBlock(pos));
+    if (id != BLOCK_RAIL) {
+        neighborChangedImpl(pos, packPos(pos), id, pos);
+    }
 }
 
 bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, int param) {
@@ -909,6 +1217,17 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
 
     const int moveCount = helper.moveCount();
     const int destroyCount = helper.destroyCount();
+
+    if (trace_ != nullptr) {
+        for (int i = 0; i < moveCount; ++i) {
+            BlockPos p = helper.moveAt(i);
+            trace_->logBlock(world_, "p.list", &p, blockId(world_.getBlock(p)), i, moveCount);
+        }
+        for (int i = 0; i < destroyCount; ++i) {
+            BlockPos p = helper.destroyAt(i);
+            trace_->logBlock(world_, "p.dlist", &p, blockId(world_.getBlock(p)), i, destroyCount);
+        }
+    }
 
     std::array<std::uint32_t, 12> movedStates{};
     for (int i = 0; i < moveCount; ++i) {
@@ -1013,6 +1332,7 @@ static bool isNcPowerSource(int id, std::uint32_t state) {
 static bool isWatchedBlock(int id) {
     return id == BLOCK_PISTON || id == BLOCK_STICKY_PISTON || id == BLOCK_PISTON_HEAD
         || id == BLOCK_FENCE_GATE || id == BLOCK_LIT_REDSTONE_LAMP || id == BLOCK_REDSTONE_LAMP
+        || id == BLOCK_TRAPDOOR || id == BLOCK_IRON_TRAPDOOR
         || isRailBlock(id);
 }
 
@@ -1155,6 +1475,16 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
             notifyNeighbors(pos, oldId, false);
             notifyNeighbors(offset(pos, facings()[0]), oldId, false); // DOWN
         }
+    }
+    if (oldId != newId && isRailBlock(newId)) {
+        // Mirrors BlockRailBase.onBlockAdded, fired whenever a rail block-type appears at this
+        // position (most commonly: a piston settling a moved rail back into the world). Must
+        // run after the watchSet_/observerSet_ maintenance above (so the recursive
+        // setBlockState calls this makes - both for this position and for any neighbor rail it
+        // newly connects to - see a world where `pos` is already registered as a rail), and
+        // before the flags&1 notify below (matching onBlockAdded firing before
+        // notifyNeighborsOfStateChange in vanilla's own World.setBlockState).
+        railOnBlockAdded(pos);
     }
     if ((flags & 1) != 0) {
         notifyNeighbors(pos, oldId, true);
@@ -1603,6 +1933,10 @@ void Simulator::loadCandidate(const Candidate& candidate) {
                 trace_->log(world_, "cpp.load", &pos, static_cast<int>(block.state), 0);
             }
         }
+    }
+    initialRailCount_ = 0;
+    for (const auto& e : world_.blocks.entries()) {
+        if (isRailBlock(blockId(e.state))) ++initialRailCount_;
     }
 
     // Build watchSet_ / observerSet_ / ncPowerSet_ from loaded blocks.

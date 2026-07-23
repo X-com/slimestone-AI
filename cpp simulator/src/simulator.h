@@ -117,6 +117,13 @@ private:
     std::unordered_set<std::uint64_t> validPistons_;  // positions of pistons not yet "spent"
     std::unordered_set<std::uint64_t> unmovedBlocks_;  // original blocks never yet displaced
     bool structuralShortCircuited_ = false;
+    // Rail block count right after the candidate is placed. A rail losing support mid-move
+    // (its supporting block briefly vacated while both are carried by the same push) is
+    // normal and self-corrects once the moving-block queue settles - so this is checked
+    // once, against the settled count at the confirmed cycle, rather than flagging the
+    // first transient "unsupported" reading. A genuine drop means a rail was dragged
+    // somewhere with nothing to land on and broke for good.
+    int initialRailCount_ = 0;
 
     void loadCandidate(const Candidate& candidate);
     void trigger(BlockPos pos);
@@ -144,6 +151,19 @@ private:
     bool shouldPistonBeExtended(BlockPos pos, std::uint32_t state) const;
     void railNeighborChanged(BlockPos pos, std::uint32_t state);
     void updateRailPowerState(BlockPos pos, std::uint32_t state, int railId, int shape);
+    // Mirrors BlockRailBase.onBlockAdded / BlockRailBase.Rail: recomputes a rail's own shape
+    // (straight, curve, or ascending) from its live neighbors whenever it's placed via
+    // setBlockState with a block-type change (piston settling a moved rail, most commonly),
+    // then cascades the same recompute to the up-to-two rails it newly connects to.
+    void railOnBlockAdded(BlockPos pos);
+    void railPlace(BlockPos pos, bool poweredHint);
+    void railConnectTo(BlockPos ownPos, const BlockPos existingConn[], int existingCount,
+                        BlockPos newTarget, bool hasCurves);
+    bool railFindRailAt(BlockPos pos, BlockPos& outPos, int& outShape) const;
+    void railConnectedPositions(BlockPos pos, int shape, BlockPos out[2], int& count) const;
+    void railRemoveSoftConnections(BlockPos ownPos, BlockPos conn[], int& count) const;
+    bool railHasNeighborRail(BlockPos thisPos, BlockPos dirPos) const;
+    int railApplyAscending(int dir, BlockPos north, BlockPos south, BlockPos west, BlockPos east) const;
     bool findPoweredRailSignal(int railId, BlockPos pos, std::uint32_t state, bool forward, int distance) const;
     bool isSameRailWithPower(int railId, BlockPos pos, bool forward, int distance, int expectedShape) const;
     bool isTopSolid(BlockPos pos) const;

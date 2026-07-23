@@ -12,6 +12,7 @@ std::array<BlockData, 256> buildBlockData() {
         entry.hasTileEntity = false;
         entry.canProvidePower = false;
         entry.isNormalCube = false;
+        entry.isFullBlock = false;
     }
 
     data[BLOCK_AIR].hardness = 0.0f;
@@ -24,6 +25,16 @@ std::array<BlockData, 256> buildBlockData() {
     data[BLOCK_PISTON_EXTENSION].hasTileEntity = true;
     data[BLOCK_REDSTONE_BLOCK].canProvidePower = true;
     data[BLOCK_OBSERVER].canProvidePower = true;
+    // Observer is a full, opaque cube (vanilla BlockObserver has no isFullCube/isOpaqueCube
+    // override) - rails and other blocks can sit on top of it - but it must NOT count as
+    // isNormalCube, or redstonePower() would route through strongPowerAll() and shadow the
+    // observer's own weak-power output (see BlockData::isNormalCube doc comment).
+    data[BLOCK_OBSERVER].isFullBlock = true;
+    // Trapdoors: not a full/opaque cube (isNormalCube stays false), no tile entity,
+    // PushReaction::Normal (both already the loop defaults above). Hardness only,
+    // matching mcp1122 BlockTrapDoor's wood (3.0) vs iron (5.0) materials.
+    data[BLOCK_TRAPDOOR].hardness = 3.0f;
+    data[BLOCK_IRON_TRAPDOOR].hardness = 5.0f;
 
     const int normalCubes[] = {
         1, 2, 3, 4, 5, 7, 12, 13, 14, 15, 16, 17, 19, 21, 22, 24, 35, 41,
@@ -34,6 +45,7 @@ std::array<BlockData, 256> buildBlockData() {
     };
     for (int id : normalCubes) {
         data[static_cast<std::size_t>(id)].isNormalCube = true;
+        data[static_cast<std::size_t>(id)].isFullBlock = true;
     }
 
     const int destroyBlocks[] = {
@@ -55,6 +67,7 @@ std::array<BlockData, 256> buildBlockData() {
     for (int id = 235; id <= 250; ++id) {
         data[static_cast<std::size_t>(id)].pushReaction = PushReaction::PushOnly;
         data[static_cast<std::size_t>(id)].isNormalCube = true;
+        data[static_cast<std::size_t>(id)].isFullBlock = true;
     }
 
     const int tileBlocks[] = {

@@ -21,13 +21,14 @@ class SimulatorRunConfig:
     startup_timeout_seconds: float = 5.0
     simulation_timeout_seconds: float | None = None
     # Selects the C++ simulator's cycle-verification method (see cpp simulator/src/simulator.cpp
-    # Simulator::simulate). False (default): burnout + settle + compareFinalToInitial, trigger can
-    # be a cold piston (artificially charged) or an already-powered one. True: structural
-    # (piston-usage) verification - trigger must be an observer or an already-powered piston (an
-    # unpowered piston trigger fails instantly, no cold start), and validity is decided by whether
-    # every piston completes exactly one extend+retract without a spent piston ever pushing a
-    # block that had never moved before.
-    structural_verify: bool = False
+    # Simulator::simulate). True (default): structural (piston-usage) verification - trigger must
+    # be an observer or an already-powered piston (an unpowered piston trigger fails instantly, no
+    # cold start), and validity is decided by whether every piston completes exactly one
+    # extend+retract without a spent piston ever pushing a block that had never moved before. All
+    # flying-machine structures are designed around observer triggering, so this is the correct
+    # default. False: burnout + settle + compareFinalToInitial, trigger can be a cold piston
+    # (artificially charged) or an already-powered one.
+    structural_verify: bool = True
 
     def validated(self) -> "SimulatorRunConfig":
         simulator_path = Path(self.simulator_path)
