@@ -1,0 +1,20 @@
+the Q list needs a different set of values for piston, observer, sticky, redstoneblock, slime
+
+global features:
+    + direction
+simulated info of a block
+    + if piston, does it get powered and unpowered and when
+        + possibly when triggered and when instead of powered (because of quazy)
+    + if observer, does the observer get updated when stationary
+        + make sure the observer powers a piston if placed
+    + if placing a redstone block, check if it powers a piston
+    (if glass was added + check if observer powers through it and not trigger piston but powers other piston through quazy)
+in each feature list it should have the following features:
+    + type
+    dont use + block-group (all blocks being pushed in unisen with a single piston)
+    + tick this block is being pushed
+        + include subtick order
+    + piston push limit of the block pushing this block
+    + tick this block retracts 
+        + include subtick order
+    + push limit of this block being pulled

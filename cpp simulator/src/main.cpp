@@ -1,5 +1,6 @@
 #include "json_stream.h"
 #include "profiler.h"
+#include "sim_event_log.h"
 #include "simulator.h"
 #include "trace.h"
 
@@ -21,8 +22,9 @@ using namespace mcp1122;
 namespace {
 
 void usage() {
-    std::cerr << "usage: mcp1122_cpp_stream [--trace path] "
-                 "[--debug-piston-helper|--debug-piston-move] [input.dat ...]\n";
+    std::cerr << "usage: mcp1122_cpp_stream [--trace path] [--simulation-data path] "
+                 "[--debug-piston-helper|--debug-piston-move] [input.dat ...]\n"
+                 "       mcp1122_cpp_stream --simulation-data-selftest\n";
 }
 
 // Builds "<dir>/<stem>-<id><ext>" from a base trace path like "outlog/cpp-update-trace.log",
@@ -51,6 +53,7 @@ std::string tracePathForCandidate(const std::string& base, std::int64_t id) {
 // so the genetic-ml worker pool can parse it line by line - only the candidate INPUT side is
 // binary, results going back out are still JSON text.
 void processStream(std::istream& in, Simulator& simulator, Trace* trace, const std::string& traceBase,
+                   SimEventLog* simData, const std::string& simDataBase,
                    bool debugPistonHelper, bool debugPistonMove) {
     Candidate candidate;
     while (true) {
@@ -74,12 +77,20 @@ void processStream(std::istream& in, Simulator& simulator, Trace* trace, const s
             if (trace != nullptr && !traceBase.empty()) {
                 trace->open(tracePathForCandidate(traceBase, candidate.id));
             }
+            if (simData != nullptr && !simDataBase.empty()) {
+                simData->open(tracePathForCandidate(simDataBase, candidate.id));
+            }
             if (debugPistonHelper) {
                 std::cout << simulator.debugPistonHelper(candidate) << '\n';
             } else if (debugPistonMove) {
                 std::cout << simulator.debugPistonMove(candidate) << '\n';
             } else {
                 std::cout << simulator.simulate(candidate).toJson() << '\n';
+            }
+            // Trailer work (block index + footer) must run before the file is complete; unlike
+            // Trace, the sim-log isn't finalized just by the next open().
+            if (simData != nullptr && simData->enabled()) {
+                simData->close();
             }
         } catch (const std::exception& error) {
             Result result;
@@ -96,6 +107,7 @@ void processStream(std::istream& in, Simulator& simulator, Trace* trace, const s
 
 int main(int argc, char** argv) {
     std::string tracePath;
+    std::string simDataPath;
     bool debugPistonHelper = false;
     bool debugPistonMove = false;
     std::vector<std::string> inputFiles;
@@ -103,6 +115,12 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--trace" && i + 1 < argc) {
             tracePath = argv[++i];
+        } else if (arg == "--simulation-data" && i + 1 < argc) {
+            simDataPath = argv[++i];
+        } else if (arg == "--simulation-data-selftest") {
+            bool ok = SimEventLog::selfTest();
+            std::cout << (ok ? "PASS" : "FAIL") << '\n';
+            return ok ? 0 : 1;
         } else if (arg == "--debug-piston-helper") {
             debugPistonHelper = true;
         } else if (arg == "--debug-piston-move") {
@@ -121,7 +139,11 @@ int main(int argc, char** argv) {
     Trace trace;
     Trace* tracePtr = tracePath.empty() ? nullptr : &trace;
 
-    Simulator simulator(tracePtr);
+    // Same per-candidate lifecycle for the binary simulation_data log.
+    SimEventLog simData;
+    SimEventLog* simDataPtr = simDataPath.empty() ? nullptr : &simData;
+
+    Simulator simulator(tracePtr, simDataPtr);
 
     if (inputFiles.empty()) {
         // Stream mode: read candidates from stdin (used by the genetic-ml worker pool).
@@ -131,7 +153,8 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
         _setmode(_fileno(stdin), _O_BINARY);
 #endif
-        processStream(std::cin, simulator, tracePtr, tracePath, debugPistonHelper, debugPistonMove);
+        processStream(std::cin, simulator, tracePtr, tracePath, simDataPtr, simDataPath,
+                      debugPistonHelper, debugPistonMove);
     } else {
         // File mode: read each named compact-format file, printing its name so batch runs show
         // which file each block of results came from. The name goes to stderr to keep stdout a
@@ -145,7 +168,8 @@ int main(int argc, char** argv) {
                 continue;
             }
             std::cerr << "========== " << path << " ==========" << '\n';
-            processStream(in, simulator, tracePtr, tracePath, debugPistonHelper, debugPistonMove);
+            processStream(in, simulator, tracePtr, tracePath, simDataPtr, simDataPath,
+                          debugPistonHelper, debugPistonMove);
         }
     }
 

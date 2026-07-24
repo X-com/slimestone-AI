@@ -11,6 +11,7 @@ add_executable(mcp1122_cpp_stream
     src/block_registry.cpp
     src/piston.cpp
     src/simulator.cpp
+    src/sim_event_log.cpp
     src/trace.cpp
     src/world.cpp
 )

@@ -1,6 +1,7 @@
 genetic algorithm/data/
 reinforcement learning/data/
 data/dev-certs/
+cpp simulator/flying-json-compact
 **/__pycache__
 **/build
 **/.venv

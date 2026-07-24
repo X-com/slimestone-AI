@@ -296,6 +296,26 @@ void Simulator::observerUpdateTick(BlockPos pos, std::uint32_t state) {
         scheduleUpdate(pos, BLOCK_OBSERVER, 2);
     }
 
+    if (eventLog_ != nullptr) {
+        std::uint64_t key = stableKey(pos);
+        int cause = SEC_SCHEDULED;
+        auto it = observerFireCause_.find(packPos(pos));
+        if (it != observerFireCause_.end()) {
+            cause = it->second;
+            observerFireCause_.erase(it);
+        }
+        SimEvent ev;
+        ev.blockKey = key;
+        ev.actorKey = key;
+        ev.kind = ObserverFired;
+        ev.flags = observerCauseFlags(static_cast<std::uint8_t>(cause));
+        std::uint32_t order = eventLog_->nextOrder();
+        ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+        ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        eventLog_->push(ev);
+        logObserverActivations(pos, state);
+    }
+
     notifyObserverFront(pos, state);
 }
 
@@ -536,6 +556,9 @@ void Simulator::observedNeighborChanged(BlockPos pos, int changedBlockId, BlockP
     const Facing& facing = facingByIndex(facingMeta(state));
     BlockPos watched = offset(pos, facing);
     if (samePos(watched, changedPos) && !metaBit(state, 3) && !isUpdateScheduled(pos, BLOCK_OBSERVER)) {
+        if (eventLog_ != nullptr) {
+            observerFireCause_[packPos(pos)] = SEC_FACING_CHANGED;
+        }
         scheduleUpdate(pos, BLOCK_OBSERVER, 2);
     }
 }
@@ -582,6 +605,87 @@ void Simulator::updateObservingBlocksAt(BlockPos pos, int sourceBlockId) {
     observedNeighborChanged(BlockPos{pos.x, pos.y, pos.z + 1}, sourceBlockId, pos);
 }
 
+std::uint64_t Simulator::stableKey(BlockPos pos) const {
+    if (currentMoveActive_ && (samePos(pos, currentMoveOldPos_) || samePos(pos, currentMoveNewPos_))) {
+        return currentMoveId_;
+    }
+    auto it = originalIdOf_.find(packPos(pos));
+    return it != originalIdOf_.end() ? it->second : packPos(pos);
+}
+
+void Simulator::logPistonQueued(BlockPos pistonPos, int direction, bool extend) {
+    // Queue/execute correlation is keyed by the piston's live position (it doesn't relocate
+    // between its own queue and execute); the record's subject is the stable id.
+    std::uint64_t pistonKey = packPos(pistonPos);
+    std::uint64_t subject = stableKey(pistonPos);
+    std::uint32_t order = eventLog_->nextOrder();
+    eventLog_->noteQueued(pistonKey, extend, world_.time, order);
+    SimEvent ev;
+    ev.blockKey = subject;
+    ev.actorKey = subject;
+    ev.kind = PistonQueued;
+    ev.direction = static_cast<std::uint8_t>(direction);
+    ev.flags = extend ? SEF_EXTEND : 0;
+    ev.activationTick = world_.time;
+    ev.scheduledTick = world_.time;
+    ev.executedTick = world_.time;
+    ev.activationSubtick = order;
+    ev.scheduledSubtick = order;
+    ev.executedSubtick = order;
+    eventLog_->push(ev);
+}
+
+// Source-side scan of an observer's pulse fan-out: emit one ObserverActivated per reacting piston/
+// observer at the block in front and that block's neighbors (the set notifyObserverFront pokes).
+void Simulator::logObserverActivations(BlockPos observerPos, std::uint32_t state) {
+    const Facing& facing = facingByIndex(facingMeta(state));
+    BlockPos front = offset(observerPos, opposite(facing));
+    std::uint64_t observerKey = stableKey(observerPos);
+    auto consider = [&](BlockPos target) {
+        int tid = blockId(world_.getBlock(target));
+        bool isPiston = (tid == BLOCK_PISTON || tid == BLOCK_STICKY_PISTON);
+        bool isObserver = (tid == BLOCK_OBSERVER);
+        if (!isPiston && !isObserver) return;
+        if (samePos(target, observerPos)) return;
+        SimEvent ev;
+        ev.blockKey = observerKey;
+        ev.actorKey = observerKey;
+        ev.targetKey = stableKey(target);
+        ev.kind = ObserverActivated;
+        ev.flags = isPiston ? SEF_TARGET_PISTON : 0;
+        std::uint32_t order = eventLog_->nextOrder();
+        ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+        ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        eventLog_->push(ev);
+    };
+    consider(front);
+    for (const Facing& f : facings()) {
+        consider(offset(front, f));
+    }
+}
+
+// Source-side scan when a redstone block appears/disappears: emit one Redstone(De)ActivatedPiston
+// per neighboring piston. Certain of the redstone identity here (setBlockState passes oldId as the
+// neighbor-change source, so a piston-side hook can't see the redstone).
+void Simulator::logRedstonePistonScan(BlockPos redstonePos, bool activating) {
+    std::uint64_t redstoneKey = stableKey(redstonePos);
+    for (const Facing& f : facings()) {
+        BlockPos n = offset(redstonePos, f);
+        int nid = blockId(world_.getBlock(n));
+        if (nid != BLOCK_PISTON && nid != BLOCK_STICKY_PISTON) continue;
+        SimEvent ev;
+        ev.blockKey = redstoneKey;
+        ev.actorKey = redstoneKey;
+        ev.targetKey = stableKey(n);
+        ev.kind = activating ? RedstoneActivatedPiston : RedstoneDeactivatedPiston;
+        ev.flags = SEF_TARGET_PISTON;
+        std::uint32_t order = eventLog_->nextOrder();
+        ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+        ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        eventLog_->push(ev);
+    }
+}
+
 void Simulator::checkForMove(BlockPos pos, std::uint32_t state) {
     PROF_SCOPE("checkForMove");
     int id = blockId(state);
@@ -596,11 +700,17 @@ void Simulator::checkForMove(BlockPos pos, std::uint32_t state) {
             if (trace_ != nullptr) {
                 trace_->logBlock(world_, "p.q+", &pos, id, 0, facing.index);
             }
+            if (eventLog_ != nullptr) {
+                logPistonQueued(pos, facing.index, true);
+            }
             addBlockEvent(pos, id, 0, facing.index);
         }
     } else if (!shouldExtend && metaBit(state, 3)) {
         if (trace_ != nullptr) {
             trace_->logBlock(world_, "p.q-", &pos, id, 1, facing.index);
+        }
+        if (eventLog_ != nullptr) {
+            logPistonQueued(pos, facing.index, false);
         }
         addBlockEvent(pos, id, 1, facing.index);
     }
@@ -1206,17 +1316,55 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
     if (trace_ != nullptr) {
         trace_->logBlock(world_, extending ? "p.mv+" : "p.mv-", &pos, blockId(world_.getBlock(pos)), direction.index, extending ? 1 : 0);
     }
+    std::uint32_t pushGroup = (eventLog_ != nullptr) ? eventLog_->nextPushGroupId() : 0;
+    std::uint64_t pistonKey = packPos(pos);                 // live position, for queue correlation
+    std::uint64_t pistonSubject = (eventLog_ != nullptr) ? stableKey(pos) : 0;  // stable log-run id
+    QueueInfo queued = (eventLog_ != nullptr) ? eventLog_->takeQueued(pistonKey, extending) : QueueInfo{};
+
     if (!extending) {
         setBlockToAir(offset(pos, direction));
     }
 
     PistonStructureHelper helper(world_, pos, direction, extending);
     if (!helper.canMove()) {
+        if (eventLog_ != nullptr) {
+            SimEvent ev;
+            ev.blockKey = pistonSubject;
+            ev.actorKey = pistonSubject;
+            ev.kind = PistonMoveExecuted;
+            ev.direction = static_cast<std::uint8_t>(direction.index);
+            ev.flags = extending ? SEF_EXTEND : 0;  // SEF_SUCCESS clear = blocked
+            ev.pushGroupId = pushGroup;
+            std::uint32_t order = eventLog_->nextOrder();
+            ev.activationTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.executedSubtick = order;
+            ev.scheduledTick = queued.found ? queued.tick : world_.time;
+            ev.scheduledSubtick = queued.found ? queued.subtick : order;
+            eventLog_->push(ev);
+        }
         return false;
     }
 
     const int moveCount = helper.moveCount();
     const int destroyCount = helper.destroyCount();
+
+    if (eventLog_ != nullptr) {
+        SimEvent ev;
+        ev.blockKey = pistonSubject;
+        ev.actorKey = pistonSubject;
+        ev.kind = PistonMoveExecuted;
+        ev.direction = static_cast<std::uint8_t>(direction.index);
+        ev.flags = (extending ? SEF_EXTEND : 0) | SEF_SUCCESS;
+        ev.pushGroupId = pushGroup;
+        ev.attemptedAmount = static_cast<std::uint8_t>(moveCount);
+        ev.actualAmount = static_cast<std::uint8_t>(moveCount);
+        std::uint32_t order = eventLog_->nextOrder();
+        ev.activationTick = ev.executedTick = world_.time;
+        ev.activationSubtick = ev.executedSubtick = order;
+        ev.scheduledTick = queued.found ? queued.tick : world_.time;
+        ev.scheduledSubtick = queued.found ? queued.subtick : order;
+        eventLog_->push(ev);
+    }
 
     if (trace_ != nullptr) {
         for (int i = 0; i < moveCount; ++i) {
@@ -1283,8 +1431,46 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
                 }
             }
         }
+        if (eventLog_ != nullptr) {
+            std::uint64_t sourceKey = packPos(source);
+            std::uint64_t targetKey = packPos(target);
+            // Re-key the block's stable original id from its old position to its new one, so its
+            // log run stays under one blockKey across arbitrarily many pushes.
+            std::uint64_t original = sourceKey;
+            auto idIt = originalIdOf_.find(sourceKey);
+            if (idIt != originalIdOf_.end()) {
+                original = idIt->second;
+                originalIdOf_.erase(idIt);
+            }
+            originalIdOf_[targetKey] = original;
+            eventLog_->setCurrentKey(original, targetKey);
+            // Arm the move guard so the setBlockState hooks below (redstone/observer vacate-old +
+            // appear-new) resolve both cells to this stable id.
+            currentMoveActive_ = true;
+            currentMoveOldPos_ = source;
+            currentMoveNewPos_ = target;
+            currentMoveId_ = original;
+
+            SimEvent ev;
+            ev.blockKey = original;
+            ev.actorKey = pistonSubject;
+            ev.targetKey = targetKey;
+            ev.kind = BlockPushed;
+            ev.direction = static_cast<std::uint8_t>(direction.index);
+            ev.flags = (extending ? SEF_EXTEND : 0) | SEF_SUCCESS;
+            ev.pushGroupId = pushGroup;
+            ev.attemptedAmount = static_cast<std::uint8_t>(moveCount);
+            ev.actualAmount = static_cast<std::uint8_t>(moveCount);
+            std::uint32_t order = eventLog_->nextOrder();
+            ev.activationTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.executedSubtick = order;
+            ev.scheduledTick = queued.found ? queued.tick : world_.time;
+            ev.scheduledSubtick = queued.found ? queued.subtick : order;
+            eventLog_->push(ev);
+        }
         setBlockState(source, 0, 2);
         setBlockState(target, setFacingMeta(makeState(BLOCK_PISTON_EXTENSION, 0), direction.index), 4);
+        currentMoveActive_ = false;
         if (trace_ != nullptr) {
             trace_->log(world_, "te.set", &target);
         }
@@ -1421,6 +1607,31 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
         if (newW) watchSet_.insert(setKey);
     }
 
+    // simulation_data: redstone block appearing/disappearing, plus its per-neighbor piston
+    // activation/deactivation (source-side, where the redstone identity is certain).
+    if (eventLog_ != nullptr && oldId != newId) {
+        if (newId == BLOCK_REDSTONE_BLOCK) {
+            SimEvent ev;
+            ev.blockKey = ev.actorKey = stableKey(pos);
+            ev.kind = RedstoneBlockAppeared;
+            std::uint32_t order = eventLog_->nextOrder();
+            ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+            eventLog_->push(ev);
+            logRedstonePistonScan(pos, true);
+        }
+        if (oldId == BLOCK_REDSTONE_BLOCK) {
+            SimEvent ev;
+            ev.blockKey = ev.actorKey = stableKey(pos);
+            ev.kind = RedstoneBlockRemoved;
+            std::uint32_t order = eventLog_->nextOrder();
+            ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+            eventLog_->push(ev);
+            logRedstonePistonScan(pos, false);
+        }
+    }
+
     // Maintain ncPowerSet_ — also for same-type state changes (observer pulse, rail power).
     bool wasPS = isNcPowerSource(oldId, oldState);
     bool isPS  = isNcPowerSource(newId, state);
@@ -1443,6 +1654,9 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
         }
     }
     if (oldId != newId && newId == BLOCK_OBSERVER) {
+        if (eventLog_ != nullptr) {
+            observerFireCause_[packPos(pos)] = SEC_OBSERVER_MOVED;
+        }
         if (metaBit(state, 3)) {
             observerUpdateTick(pos, state);
         } else if (!isUpdateScheduled(pos, BLOCK_OBSERVER)) {
@@ -1924,6 +2138,9 @@ void Simulator::loadCandidate(const Candidate& candidate) {
     validPistons_.clear();
     unmovedBlocks_.clear();
     structuralShortCircuited_ = false;
+    originalIdOf_.clear();
+    observerFireCause_.clear();
+    currentMoveActive_ = false;
 
     for (const BlockEntry& block : candidate.blocks) {
         if (block.state != 0) {
@@ -1956,6 +2173,22 @@ void Simulator::loadCandidate(const Candidate& candidate) {
         // the structure but never fires during the observed cycle (cargo, decorative, unrelated
         // mechanism) never counts against validity.
         unmovedBlocks_.insert(e.key);
+        // simulation_data: every original block gets a tracked identity + index slot up front.
+        if (eventLog_ != nullptr) {
+            eventLog_->registerOriginalBlock(e.key, e.state);
+            originalIdOf_[e.key] = e.key;
+        }
+    }
+
+    // simulation_data: redstone blocks placed at load (bypassing setBlockState) that already border
+    // a piston power it from the start - record that initial activation so the redstone->piston
+    // relationship isn't missing for statically-adjacent power sources (e.g. simple_caterpillar).
+    if (eventLog_ != nullptr) {
+        for (const auto& e : world_.blocks.entries()) {
+            if (blockId(e.state) == BLOCK_REDSTONE_BLOCK) {
+                logRedstonePistonScan(unpackPos(e.key), true);
+            }
+        }
     }
 
     if (trace_ != nullptr) {

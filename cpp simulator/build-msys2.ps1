@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Force -Path "build" | Out-Null
     src\block_registry.cpp `
     src\piston.cpp `
     src\simulator.cpp `
+    src\sim_event_log.cpp `
     src\trace.cpp `
     src\world.cpp `
     -o build\cpp_simulator_stream.exe

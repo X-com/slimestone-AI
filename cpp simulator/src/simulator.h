@@ -2,6 +2,7 @@
 
 #include "json_stream.h"
 #include "facing.h"
+#include "sim_event_log.h"
 #include "trace.h"
 #include "world.h"
 
@@ -36,7 +37,7 @@ struct Result {
 
 class Simulator {
 public:
-    explicit Simulator(Trace* trace) : trace_(trace) {}
+    explicit Simulator(Trace* trace, SimEventLog* eventLog = nullptr) : trace_(trace), eventLog_(eventLog) {}
     Result simulate(const Candidate& candidate);
     std::string debugPistonHelper(const Candidate& candidate);
     std::string debugPistonMove(const Candidate& candidate);
@@ -81,6 +82,23 @@ private:
 
     World world_;
     Trace* trace_ = nullptr;
+    // Optional binary event log ("simulation_data"). Null = disabled; every hook is gated on it,
+    // and the two bookkeeping maps below are only mutated when it is non-null.
+    SimEventLog* eventLog_ = nullptr;
+    // current position -> stable original-block id (packPos at load), re-keyed through every piston
+    // move so a block's log run survives arbitrarily many pushes.
+    std::unordered_map<std::uint64_t, std::uint64_t> originalIdOf_;
+    // observer position -> pending fire cause (SEC_*), stashed when a pulse is scheduled/placed and
+    // consumed when the observer actually fires in observerUpdateTick.
+    std::unordered_map<std::uint64_t, int> observerFireCause_;
+    // While a single block is relocating inside doPistonMove, its old and new positions both map to
+    // this stable id - so setBlockState hooks firing mid-move (redstone/observer vacating the old
+    // cell, appearing in the new) resolve to the block's stable log-run id regardless of whether
+    // originalIdOf_ has been re-keyed yet.
+    bool currentMoveActive_ = false;
+    BlockPos currentMoveOldPos_;
+    BlockPos currentMoveNewPos_;
+    std::uint64_t currentMoveId_ = 0;
     std::vector<World::ScheduledTick> pendingDue_;
     // Reused scratch buffers for draining world_.blockEvents[idx] / movingBuckets[idx] each
     // tick without swapping capacity out to a fresh local (which would free it on scope exit
@@ -148,6 +166,14 @@ private:
     void notifyNeighborsExcept(BlockPos pos, int sourceBlockId, int skipFacing);
     void updateObservingBlocksAt(BlockPos pos, int sourceBlockId);
     void checkForMove(BlockPos pos, std::uint32_t state);
+    // simulation_data event-log helpers (only called when eventLog_ != nullptr).
+    // Maps a live position to the stable original-block id that owns that block's log run, so a
+    // block carried to a new position still logs under one blockKey. Falls back to the raw packed
+    // position for anything not tracked.
+    std::uint64_t stableKey(BlockPos pos) const;
+    void logPistonQueued(BlockPos pistonPos, int direction, bool extend);
+    void logObserverActivations(BlockPos observerPos, std::uint32_t state);
+    void logRedstonePistonScan(BlockPos redstonePos, bool activating);
     bool shouldPistonBeExtended(BlockPos pos, std::uint32_t state) const;
     void railNeighborChanged(BlockPos pos, std::uint32_t state);
     void updateRailPowerState(BlockPos pos, std::uint32_t state, int railId, int shape);
