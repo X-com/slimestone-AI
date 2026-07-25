@@ -23,6 +23,12 @@ public:
     BlockPos moveAt(int index) const { return toMove_[static_cast<std::size_t>(index)]; }
     BlockPos destroyAt(int index) const { return toDestroy_[static_cast<std::size_t>(index)]; }
 
+    // simulation_data (SDL3): why canMove() returned false, and (for the push-limit case only) the
+    // real attempted group size, e.g. 13/14/... - "how far over the wall", not just the limit itself.
+    // FAIL_NONE while canMove() hasn't returned false yet / on success.
+    std::uint8_t failReason() const { return failReason_; }
+    int attemptedOverLimit() const { return attemptedOverLimit_; }
+
 private:
     const World& world_;
     BlockPos pistonPos_;
@@ -33,6 +39,8 @@ private:
     std::array<BlockPos, 4> toDestroy_{};
     int destroyCount_ = 0;
     std::array<BlockPos, 12> reorderTmp_{};
+    std::uint8_t failReason_ = 0;      // SimFailureReason (see sim_event_log.h); avoids a header dep by using the raw value
+    int attemptedOverLimit_ = 0;
 
     bool addBlockLine(BlockPos origin, const Facing& branchFacing);
     bool addBranchingBlocks(BlockPos fromPos);

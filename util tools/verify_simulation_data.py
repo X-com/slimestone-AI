@@ -2,18 +2,26 @@
 
 Runs a few flying-machine fixtures through cpp_simulator_stream.exe with --simulation-data, then
 decodes the resulting per-candidate binary log and prints, per block, that block's complete
-self-contained event history in order. This is the human-readable check that the log captures
-everything (see the plan's per-block coverage tables); a visualizer can later import the decode
-functions (read_footer / read_block_index / iter_block_events) instead of reparsing.
+self-contained event history in order, plus the run's failure/push-group/initial-state/component
+sections and its RunSummary. This is the human-readable check that the log captures everything; the
+piston-event causality graph visualizer (graph_visualizer.py, same folder) is built on the decode
+functions below (read_footer / read_block_index / iter_block_events / read_push_groups / etc.)
+instead of reparsing.
 
 Usage:
     py verify_simulation_data.py [fixture_name ...]      # defaults to a small representative set
     py verify_simulation_data.py --self-check            # decode round-trip assert, no exe needed
 
 On-disk layout (must stay in sync with cpp simulator/src/sim_event_log.h):
-    event section : N x SimEvent (72 bytes), grouped by block, each block's run in sim order
-    block index   : B x BlockIndexEntry (32 bytes), sorted by originalKey
-    footer        : 48 bytes, magic "SDL2", counts, blockIndexOffset
+    event section      : N x SimEvent (96 bytes), grouped by block, each block's run in sim order
+    block index        : B x BlockIndexEntry (32 bytes), sorted by originalKey
+    push-group section : G x PushGroupRecord (48 bytes), one per piston firing attempt
+    push-group members : flat uint64 array, indexed via memberOffset/memberCount
+    initial-state       : one InitialBlockState (32 bytes) per original block - the model's input
+    component section   : one ComponentRecord (32 bytes) per t=0 sticky group
+    component members   : flat uint64 array, indexed via memberOffset/memberCount
+    run summary         : one RunSummary (64 bytes)
+    footer              : 148 bytes, magic "SDL3", offsets/counts for every section above
 """
 from __future__ import annotations
 
@@ -35,15 +43,28 @@ MSYS_BIN = r"C:\msys64\ucrt64\bin"
 # adjacent piston (upwards_engine).
 DEFAULT_FIXTURES = ["simple_observer_engine", "simple_upwards_engine"]
 
-_EVENT = struct.Struct("<QQQqqqIIIIBBBBBBH")   # 72 bytes
-_INDEX = struct.Struct("<QQIIII")               # 32 bytes
-_FOOTER = struct.Struct("<4sIQQIIIIQ")          # 48 bytes
-assert _EVENT.size == 72 and _INDEX.size == 32 and _FOOTER.size == 48
+_EVENT = struct.Struct("<QQQQqqqIIIIhhhhhhBBBBBBBBI")  # 96 bytes
+_INDEX = struct.Struct("<QQIIII")                       # 32 bytes (unchanged from SDL2)
+_PUSHGROUP = struct.Struct("<QQiHBBBBBBIIIQ")           # 48 bytes
+_INITIAL = struct.Struct("<QhhhHBBBBhBBII")             # 32 bytes
+_COMPONENT = struct.Struct("<hBBIhhhhhhIQ")             # 32 bytes
+_SUMMARY = struct.Struct("<BBbBii" + "h" * 12 + "I" * 7)  # 64 bytes
+_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQ")  # 148 bytes
+assert _EVENT.size == 96, _EVENT.size
+assert _INDEX.size == 32, _INDEX.size
+assert _PUSHGROUP.size == 48, _PUSHGROUP.size
+assert _INITIAL.size == 32, _INITIAL.size
+assert _COMPONENT.size == 32, _COMPONENT.size
+assert _SUMMARY.size == 64, _SUMMARY.size
+assert _FOOTER.size == 148, _FOOTER.size
 
 KIND_NAMES = {
     0: "PistonQueued", 1: "PistonMoveExecuted", 2: "BlockPushed", 3: "ObserverFired",
     4: "ObserverActivated", 5: "RedstoneBlockAppeared", 6: "RedstoneBlockRemoved",
     7: "RedstoneActivatedPiston", 8: "RedstoneDeactivatedPiston",
+    9: "PistonExtendBlocked", 10: "PistonRetractBlocked", 11: "BlockLeftBehind",
+    12: "BlockDestroyed", 13: "ComponentSplit", 14: "ObserverSuppressed",
+    15: "PistonNeighborNotified",
 }
 CAUSE_NAMES = {0: "scheduled", 1: "facing-changed", 2: "observer-moved"}
 DIR_NAMES = {0: "DOWN", 1: "UP", 2: "NORTH", 3: "SOUTH", 4: "WEST", 5: "EAST", 0xFF: "-"}
@@ -54,6 +75,16 @@ BLOCK_NAMES = {
     165: "slime", 218: "observer", 123: "redstone_lamp", 124: "lit_redstone_lamp",
     49: "obsidian", 1: "stone", 20: "glass",
 }
+FAILURE_REASON_NAMES = {
+    0: "None", 1: "PushLimitExceeded", 2: "ImmovableBlockInPath", 3: "NoSpaceToExtend",
+    4: "BlockCannotBePushed", 5: "AlreadyInTargetState", 6: "NotPowered", 7: "OutOfBounds",
+}
+TERMINATION_NAMES = {
+    0: "CycleDetected", 1: "TickBudget", 2: "NothingHappened", 3: "StructureDestroyed",
+    4: "OutOfBounds", 5: "InternalError",
+}
+MOVABILITY_NAMES = {0: "movable", 1: "immovable", 2: "pops"}
+STICKINESS_NAMES = {0: "none", 1: "sticks-all", 2: "sticks-all-except-slime"}
 
 SEF_EXTEND = 1 << 0
 SEF_SUCCESS = 1 << 1
@@ -72,15 +103,18 @@ def unpack_pos(key: int) -> tuple[int, int, int]:
 
 
 class SimEvent:
-    __slots__ = ("blockKey", "actorKey", "targetKey", "activationTick", "scheduledTick",
-                 "executedTick", "activationSubtick", "scheduledSubtick", "executedSubtick",
-                 "pushGroupId", "kind", "direction", "flags", "attemptedAmount", "actualAmount")
+    __slots__ = ("blockKey", "actorKey", "targetKey", "globalSeq", "activationTick",
+                 "scheduledTick", "executedTick", "activationSubtick", "scheduledSubtick",
+                 "executedSubtick", "pushGroupId", "fromX", "fromY", "fromZ", "toX", "toY", "toZ",
+                 "kind", "direction", "flags", "attemptedAmount", "actualAmount", "failureReason",
+                 "neighborSourceBlockId")
 
     def __init__(self, raw: tuple):
-        (self.blockKey, self.actorKey, self.targetKey, self.activationTick, self.scheduledTick,
-         self.executedTick, self.activationSubtick, self.scheduledSubtick, self.executedSubtick,
-         self.pushGroupId, self.kind, self.direction, self.flags, self.attemptedAmount,
-         self.actualAmount, _r0, _r1) = raw
+        (self.blockKey, self.actorKey, self.targetKey, self.globalSeq, self.activationTick,
+         self.scheduledTick, self.executedTick, self.activationSubtick, self.scheduledSubtick,
+         self.executedSubtick, self.pushGroupId, self.fromX, self.fromY, self.fromZ, self.toX,
+         self.toY, self.toZ, self.kind, self.direction, self.flags, self.attemptedAmount,
+         self.actualAmount, self.failureReason, self.neighborSourceBlockId, _r1, _r2) = raw
 
 
 class BlockIndexEntry:
@@ -91,14 +125,73 @@ class BlockIndexEntry:
          self.originalState, _r) = raw
 
 
+class PushGroupRecord:
+    __slots__ = ("globalSeq", "pistonKey", "tick", "subtick", "direction", "succeeded",
+                 "failureReason", "memberCount", "memberOffset", "attemptedCount")
+
+    def __init__(self, raw: tuple):
+        (self.globalSeq, self.pistonKey, self.tick, self.subtick, self.direction, self.succeeded,
+         self.failureReason, _p0, _p1, _p2, self.memberCount, self.memberOffset,
+         self.attemptedCount, _r) = raw
+
+
+class InitialBlockState:
+    __slots__ = ("stableKey", "x", "y", "z", "blockTypeId", "facing", "stateFlags",
+                 "movabilityClass", "stickinessClass", "componentId", "isTrigger", "rawState")
+
+    def __init__(self, raw: tuple):
+        (self.stableKey, self.x, self.y, self.z, self.blockTypeId, self.facing, self.stateFlags,
+         self.movabilityClass, self.stickinessClass, self.componentId, self.isTrigger, _pad,
+         self.rawState, _r) = raw
+
+
+class ComponentRecord:
+    __slots__ = ("componentId", "containsImmovable", "memberCount", "bboxMin", "bboxMax",
+                 "memberOffset")
+
+    def __init__(self, raw: tuple):
+        (self.componentId, self.containsImmovable, _pad, self.memberCount,
+         minx, miny, minz, maxx, maxy, maxz, self.memberOffset, _r) = raw
+        self.bboxMin = (minx, miny, minz)
+        self.bboxMax = (maxx, maxy, maxz)
+
+
+class RunSummary:
+    __slots__ = ("terminationReason", "validCycle", "travelAxis", "totalTicks", "period",
+                 "netShift", "bboxMin", "bboxMax", "triggerPos", "totalEvents",
+                 "distinctBlocksWithEvents", "maxObserverChainDepth", "maxPushGroupSize",
+                 "pushLimitFailureCount", "blockCount")
+
+    def __init__(self, raw: tuple):
+        (self.terminationReason, self.validCycle, self.travelAxis, _pad, self.totalTicks,
+         self.period, sx, sy, sz, minx, miny, minz, maxx, maxy, maxz, tx, ty, tz,
+         self.totalEvents, self.distinctBlocksWithEvents, self.maxObserverChainDepth,
+         self.maxPushGroupSize, self.pushLimitFailureCount, self.blockCount, _r) = raw
+        self.netShift = (sx, sy, sz)
+        self.bboxMin = (minx, miny, minz)
+        self.bboxMax = (maxx, maxy, maxz)
+        self.triggerPos = (tx, ty, tz)
+
+
 def read_footer(data: bytes) -> dict:
-    magic, version, event_count, block_index_off, block_count, ev_sz, blk_sz, _r, _r2 = \
+    (magic, version, sim_build_hash, gen_seed, event_count, block_index_off, block_count, ev_sz,
+     blk_sz, push_group_off, push_group_count, push_group_sz, push_member_off, push_member_count,
+     _pad0, initial_off, initial_count, initial_sz, component_off, component_count, component_sz,
+     component_member_off, component_member_count, summary_sz, summary_off, _r) = \
         _FOOTER.unpack_from(data, len(data) - _FOOTER.size)
-    if magic != b"SDL2":
-        raise ValueError(f"bad magic {magic!r}")
+    if magic != b"SDL3":
+        raise ValueError(f"bad magic {magic!r} (expected SDL3)")
     if ev_sz != _EVENT.size or blk_sz != _INDEX.size:
         raise ValueError(f"record size mismatch ev={ev_sz} blk={blk_sz}")
-    return {"eventCount": event_count, "blockIndexOffset": block_index_off, "blockCount": block_count}
+    return {
+        "formatVersion": version, "eventCount": event_count, "blockIndexOffset": block_index_off,
+        "blockCount": block_count, "pushGroupOffset": push_group_off,
+        "pushGroupCount": push_group_count, "pushMemberOffset": push_member_off,
+        "pushMemberCount": push_member_count, "initialOffset": initial_off,
+        "initialCount": initial_count, "componentOffset": component_off,
+        "componentCount": component_count, "componentMemberOffset": component_member_off,
+        "componentMemberCount": component_member_count, "summaryOffset": summary_off,
+    }
 
 
 def read_block_index(data: bytes, footer: dict) -> list[BlockIndexEntry]:
@@ -112,10 +205,42 @@ def iter_block_events(data: bytes, entry: BlockIndexEntry):
         yield SimEvent(_EVENT.unpack_from(data, (entry.firstEventIdx + i) * _EVENT.size))
 
 
+def read_push_groups(data: bytes, footer: dict) -> list[PushGroupRecord]:
+    off = footer["pushGroupOffset"]
+    return [PushGroupRecord(_PUSHGROUP.unpack_from(data, off + i * _PUSHGROUP.size))
+            for i in range(footer["pushGroupCount"])]
+
+
+def read_push_members(data: bytes, footer: dict) -> list[int]:
+    off = footer["pushMemberOffset"]
+    return list(struct.unpack_from(f"<{footer['pushMemberCount']}Q", data, off))
+
+
+def read_initial_state(data: bytes, footer: dict) -> list[InitialBlockState]:
+    off = footer["initialOffset"]
+    return [InitialBlockState(_INITIAL.unpack_from(data, off + i * _INITIAL.size))
+            for i in range(footer["initialCount"])]
+
+
+def read_components(data: bytes, footer: dict) -> list[ComponentRecord]:
+    off = footer["componentOffset"]
+    return [ComponentRecord(_COMPONENT.unpack_from(data, off + i * _COMPONENT.size))
+            for i in range(footer["componentCount"])]
+
+
+def read_component_members(data: bytes, footer: dict) -> list[int]:
+    off = footer["componentMemberOffset"]
+    return list(struct.unpack_from(f"<{footer['componentMemberCount']}Q", data, off))
+
+
+def read_summary(data: bytes, footer: dict) -> RunSummary:
+    return RunSummary(_SUMMARY.unpack_from(data, footer["summaryOffset"]))
+
+
 def _fmt_event(ev: SimEvent) -> str:
     kind = KIND_NAMES.get(ev.kind, f"?{ev.kind}")
     parts = [f"t={ev.activationTick:<4} s={ev.activationSubtick:<4} {kind}"]
-    if ev.kind in (0, 1, 2):  # piston/push
+    if ev.kind in (0, 1, 2, 9, 10):  # piston queue/execute/blocked/push
         ext = "extend" if ev.flags & SEF_EXTEND else "retract"
         parts.append(ext)
         parts.append(f"dir={DIR_NAMES.get(ev.direction, ev.direction)}")
@@ -123,6 +248,9 @@ def _fmt_event(ev: SimEvent) -> str:
             parts.append("moved" if ev.flags & SEF_SUCCESS else "BLOCKED")
         if ev.kind == 2:
             parts.append(f"by piston{unpack_pos(ev.actorKey)}->{unpack_pos(ev.targetKey)}")
+            parts.append(f"({ev.fromX},{ev.fromY},{ev.fromZ})->({ev.toX},{ev.toY},{ev.toZ})")
+        if ev.kind in (9, 10) or ev.failureReason:
+            parts.append(f"FAIL={FAILURE_REASON_NAMES.get(ev.failureReason, ev.failureReason)}")
         parts.append(f"amt {ev.attemptedAmount}->{ev.actualAmount}")
         parts.append(f"grp={ev.pushGroupId}")
         parts.append(f"sched(t={ev.scheduledTick},s={ev.scheduledSubtick})")
@@ -133,6 +261,9 @@ def _fmt_event(ev: SimEvent) -> str:
         parts.append(f"-> {tgt}{unpack_pos(ev.targetKey)}")
     elif ev.kind in (7, 8):  # redstone activate/deactivate
         parts.append(f"-> piston{unpack_pos(ev.targetKey)}")
+    elif ev.kind == 15:  # PistonNeighborNotified (generic catch-all cause)
+        src_name = BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
+        parts.append(f"from {unpack_pos(ev.actorKey)} (was {src_name})")
     return "  " + " ".join(parts)
 
 
@@ -153,6 +284,31 @@ def dump_log(path: Path) -> int:
             empty += 1
         for ev in iter_block_events(data, entry):
             print(_fmt_event(ev))
+
+    groups = read_push_groups(data, footer)
+    members = read_push_members(data, footer)
+    if groups:
+        print(f"-- {len(groups)} push-group attempt(s) --")
+        for g in groups:
+            status = "OK" if g.succeeded else f"FAILED ({FAILURE_REASON_NAMES.get(g.failureReason, g.failureReason)})"
+            mem = [unpack_pos(members[g.memberOffset + i]) for i in range(g.memberCount)]
+            print(f"  piston{unpack_pos(g.pistonKey)} t={g.tick} attempted={g.attemptedCount} {status} members={mem}")
+
+    initial = read_initial_state(data, footer)
+    print(f"-- {len(initial)} initial-state record(s) --")
+    components = read_components(data, footer)
+    comp_members = read_component_members(data, footer)
+    print(f"-- {len(components)} component(s) at t=0 --")
+    for c in components:
+        mem = [unpack_pos(comp_members[c.memberOffset + i]) for i in range(c.memberCount)]
+        print(f"  component {c.componentId}: {c.memberCount} block(s) bbox={c.bboxMin}..{c.bboxMax} "
+              f"containsImmovable={bool(c.containsImmovable)} members={mem}")
+
+    summary = read_summary(data, footer)
+    print(f"-- RunSummary: {TERMINATION_NAMES.get(summary.terminationReason, summary.terminationReason)} "
+          f"validCycle={bool(summary.validCycle)} ticks={summary.totalTicks} period={summary.period} "
+          f"netShift={summary.netShift} maxPushGroupSize={summary.maxPushGroupSize} "
+          f"pushLimitFailures={summary.pushLimitFailureCount} --")
     return empty
 
 
@@ -192,13 +348,17 @@ def _self_check() -> None:
     """Round-trip a hand-built buffer through the reader (no exe needed)."""
     # Two blocks, interleaved emission order; block A must decode its 2 events in subtick order.
     kA, kB = 111, 222
+
+    def make_event(blockKey, actorKey, kind, subtick, tick, pushGroupId=0):
+        return (blockKey, actorKey, 0, subtick, tick, tick, tick, subtick, subtick, subtick,
+                pushGroupId, 0, 0, 0, 0, 0, 0, kind, 0xFF, 0, 0, 0, 0, 0, 0, 0)
+
     events = [
-        (kA, kA, 0, 5, 5, 5, 0, 0, 0, 10, 2, 5, SEF_EXTEND | SEF_SUCCESS, 1, 1, 0, 0),
-        (kB, kB, 0, 5, 5, 5, 1, 1, 1, 0, 3, 0xFF, 0, 0, 0, 0, 0),
-        (kA, kA, 0, 18, 18, 18, 2, 2, 2, 11, 2, 5, SEF_EXTEND | SEF_SUCCESS, 1, 1, 0, 0),
+        make_event(kA, kA, 2, 0, 5, pushGroupId=10),
+        make_event(kB, kB, 3, 1, 5),
+        make_event(kA, kA, 2, 2, 18, pushGroupId=11),
     ]
-    # group by block: A gets events[0],events[2]; B gets events[1]
-    order = [events[0], events[2], events[1]]
+    order = [events[0], events[2], events[1]]  # group by block: A's two, then B's one
     body = b"".join(_EVENT.pack(*e) for e in order)
     index = [
         _INDEX.pack(kA, kA, 0, 2, 165, 0),
@@ -206,7 +366,35 @@ def _self_check() -> None:
     ]
     idx_off = len(body)
     body += b"".join(index)
-    footer = _FOOTER.pack(b"SDL2", 2, 3, idx_off, 2, 72, 32, 0, 0)
+
+    pg_off = len(body)
+    push_members = [kA, kB]
+    body += b"".join(struct.pack("<Q", m) for m in push_members)
+    pg = _PUSHGROUP.pack(99, kA, 18, 4, 0, 0, 1, 0, 0, 0, len(push_members), 0, 13, 0)
+    pg_rec_off = len(body)
+    body += pg
+
+    initial_off = len(body)
+    ib = _INITIAL.pack(kA, 1, 2, 3, 165, 0xFF, 0, 0, 1, 0, 0, 0, 0, 0)
+    body += ib
+
+    comp_member_off = len(body)
+    body += b"".join(struct.pack("<Q", m) for m in [kA, kB])
+    comp_off = len(body)
+    body += _COMPONENT.pack(0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    summary_off = len(body)
+    body += _SUMMARY.pack(0, 1, 0, 0, 20, 13, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 2, 0, 13, 1, 2, 0)
+
+    footer = _FOOTER.pack(
+        b"SDL3", 3, 0, 0, 3, idx_off, 2, 96, 32,
+        pg_rec_off, 1, 48,
+        pg_off, len(push_members), 0,
+        initial_off, 1, 32,
+        comp_off, 1, 32,
+        comp_member_off, 2,
+        64, summary_off, 0,
+    )
     data = body + footer
 
     f = read_footer(data)
@@ -217,6 +405,21 @@ def _self_check() -> None:
     assert evs[0].pushGroupId == 10 and evs[1].pushGroupId == 11
     assert evs[0].activationSubtick < evs[1].activationSubtick
     assert unpack_pos(kA) == unpack_pos(kA)
+
+    groups = read_push_groups(data, f)
+    assert len(groups) == 1 and groups[0].succeeded == 0 and groups[0].attemptedCount == 13
+    members = read_push_members(data, f)
+    assert members == [kA, kB]
+
+    initial = read_initial_state(data, f)
+    assert len(initial) == 1 and initial[0].stableKey == kA and initial[0].blockTypeId == 165
+
+    components = read_components(data, f)
+    assert len(components) == 1 and components[0].memberCount == 2
+
+    summary = read_summary(data, f)
+    assert summary.terminationReason == 0 and summary.validCycle == 1 and summary.period == 13
+
     print("self-check PASS")
 
 

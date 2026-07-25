@@ -19,11 +19,37 @@ void SimEventLog::open(const std::string& path) {
     buffer_.clear();
     buffer_.reserve(4096);
     blockIndex_.clear();
+    pushGroups_.clear();
+    pushMembers_.clear();
+    initial_.clear();
+    components_.clear();
+    componentMembers_.clear();
+    summary_ = RunSummary{};
+    hasSummary_ = false;
     indexOf_.clear();
     pendingQueue_.clear();
     nextOrder_ = 0;
     nextPushGroupId_ = 0;
     out_.open(path.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
+}
+
+void SimEventLog::addPushGroup(std::uint64_t globalSeq, std::uint64_t pistonKey, std::int32_t tick,
+                               std::uint16_t subtick, std::uint8_t direction, bool succeeded,
+                               std::uint8_t failureReason, std::uint32_t attemptedCount,
+                               const std::vector<std::uint64_t>& members) {
+    PushGroupRecord rec;
+    rec.globalSeq = globalSeq;
+    rec.pistonKey = pistonKey;
+    rec.tick = tick;
+    rec.subtick = subtick;
+    rec.direction = direction;
+    rec.succeeded = succeeded ? 1 : 0;
+    rec.failureReason = failureReason;
+    rec.attemptedCount = attemptedCount;
+    rec.memberOffset = static_cast<std::uint32_t>(pushMembers_.size());
+    rec.memberCount = static_cast<std::uint32_t>(members.size());
+    pushMembers_.insert(pushMembers_.end(), members.begin(), members.end());
+    pushGroups_.push_back(rec);
 }
 
 void SimEventLog::registerOriginalBlock(std::uint64_t originalKey, std::uint32_t originalState) {
@@ -99,23 +125,70 @@ void SimEventLog::close() {
     std::sort(blockIndex_.begin(), blockIndex_.end(),
         [](const BlockIndexEntry& a, const BlockIndexEntry& b) { return a.originalKey < b.originalKey; });
 
-    if (!buffer_.empty()) {
-        out_.write(reinterpret_cast<const char*>(buffer_.data()),
-                   static_cast<std::streamsize>(buffer_.size() * sizeof(SimEvent)));
+    // Fill the measured-from-log summary fields (the simulator set the logical ones via setSummary).
+    RunSummary footerSummary = summary_;
+    footerSummary.totalEvents = static_cast<std::uint32_t>(buffer_.size());
+    std::uint32_t distinct = 0;
+    for (std::size_t j = 0; j < buffer_.size();) {
+        std::uint64_t key = buffer_[j].blockKey;
+        ++distinct;
+        while (j < buffer_.size() && buffer_[j].blockKey == key) ++j;
     }
+    footerSummary.distinctBlocksWithEvents = distinct;
+    std::uint32_t maxGroup = 0, pushLimitFails = 0;
+    for (const PushGroupRecord& g : pushGroups_) {
+        maxGroup = std::max(maxGroup, g.attemptedCount);
+        if (g.failureReason == FAIL_PUSH_LIMIT_EXCEEDED) ++pushLimitFails;
+    }
+    footerSummary.maxPushGroupSize = maxGroup;
+    footerSummary.pushLimitFailureCount = pushLimitFails;
+    if (footerSummary.totalEvents == 0) {
+        // Zero events is the generator's free rejection filter regardless of why the simulator
+        // stopped (tick budget vs. a same-position "cycle") - nothing worth training on happened.
+        footerSummary.terminationReason = TERM_NOTHING_HAPPENED;
+    }
+
+    // Write every section in footer order, tracking byte offsets as we go.
     SimLogFooter footer;
+    auto writeVec = [&](const void* data, std::size_t count, std::size_t recSize) -> std::uint64_t {
+        std::uint64_t off = static_cast<std::uint64_t>(out_.tellp());
+        if (count > 0) {
+            out_.write(reinterpret_cast<const char*>(data),
+                       static_cast<std::streamsize>(count * recSize));
+        }
+        return off;
+    };
+
+    writeVec(buffer_.data(), buffer_.size(), sizeof(SimEvent));  // events start at offset 0
     footer.eventCount = buffer_.size();
-    footer.blockIndexOffset = buffer_.size() * sizeof(SimEvent);
+    footer.blockIndexOffset = writeVec(blockIndex_.data(), blockIndex_.size(), sizeof(BlockIndexEntry));
     footer.blockCount = static_cast<std::uint32_t>(blockIndex_.size());
-    if (!blockIndex_.empty()) {
-        out_.write(reinterpret_cast<const char*>(blockIndex_.data()),
-                   static_cast<std::streamsize>(blockIndex_.size() * sizeof(BlockIndexEntry)));
-    }
+    footer.pushGroupOffset = writeVec(pushGroups_.data(), pushGroups_.size(), sizeof(PushGroupRecord));
+    footer.pushGroupCount = static_cast<std::uint32_t>(pushGroups_.size());
+    footer.pushMemberOffset = writeVec(pushMembers_.data(), pushMembers_.size(), sizeof(std::uint64_t));
+    footer.pushMemberCount = static_cast<std::uint32_t>(pushMembers_.size());
+    footer.initialOffset = writeVec(initial_.data(), initial_.size(), sizeof(InitialBlockState));
+    footer.initialCount = static_cast<std::uint32_t>(initial_.size());
+    footer.componentOffset = writeVec(components_.data(), components_.size(), sizeof(ComponentRecord));
+    footer.componentCount = static_cast<std::uint32_t>(components_.size());
+    footer.componentMemberOffset =
+        writeVec(componentMembers_.data(), componentMembers_.size(), sizeof(std::uint64_t));
+    footer.componentMemberCount = static_cast<std::uint32_t>(componentMembers_.size());
+    footer.summaryOffset = static_cast<std::uint64_t>(out_.tellp());
+    out_.write(reinterpret_cast<const char*>(&footerSummary), sizeof(RunSummary));
+
     out_.write(reinterpret_cast<const char*>(&footer), sizeof(footer));
     out_.close();
 
     buffer_.clear();
     blockIndex_.clear();
+    pushGroups_.clear();
+    pushMembers_.clear();
+    initial_.clear();
+    components_.clear();
+    componentMembers_.clear();
+    summary_ = RunSummary{};
+    hasSummary_ = false;
     indexOf_.clear();
     pendingQueue_.clear();
 }
@@ -158,6 +231,26 @@ bool SimEventLog::selfTest() {
         e4.activationTick = 18;
         log.push(e4);
 
+        // One failed push group with membership (the informative case).
+        log.addPushGroup(/*globalSeq*/ 99, /*pistonKey*/ kA, /*tick*/ 18, /*subtick*/ 4,
+                         /*direction*/ 0, /*succeeded*/ false, FAIL_PUSH_LIMIT_EXCEEDED,
+                         /*attemptedCount*/ 13, std::vector<std::uint64_t>{kA, kB});
+
+        // One initial-state record and one component record referencing both blocks.
+        InitialBlockState ib;
+        ib.stableKey = kA; ib.x = 1; ib.y = 2; ib.z = 3; ib.blockTypeId = 165;
+        ib.movabilityClass = MOVABILITY_MOVABLE; ib.stickinessClass = STICKINESS_ALL; ib.componentId = 0;
+        log.setInitialState(std::vector<InitialBlockState>{ib});
+
+        ComponentRecord cr;
+        cr.componentId = 0; cr.memberCount = 2; cr.memberOffset = 0;
+        log.setComponents(std::vector<ComponentRecord>{cr}, std::vector<std::uint64_t>{kA, kB});
+
+        RunSummary rs;
+        rs.terminationReason = TERM_CYCLE_DETECTED; rs.validCycle = 1; rs.period = 13;
+        rs.netShift[0] = 1; rs.blockCount = 2;
+        log.setSummary(rs);
+
         log.close();
     }
 
@@ -176,7 +269,7 @@ bool SimEventLog::selfTest() {
     SimLogFooter footer;
     in.seekg(size - static_cast<std::streamoff>(sizeof(SimLogFooter)), std::ios::beg);
     in.read(reinterpret_cast<char*>(&footer), sizeof(footer));
-    if (std::memcmp(footer.magic, "SDL2", 4) != 0 || footer.eventRecSize != sizeof(SimEvent)) {
+    if (std::memcmp(footer.magic, "SDL3", 4) != 0 || footer.eventRecSize != sizeof(SimEvent)) {
         std::cerr << "selftest: bad footer\n";
         return false;
     }
@@ -213,6 +306,52 @@ bool SimEventLog::selfTest() {
         && runA[0].activationSubtick < runA[1].activationSubtick
         && runB[0].kind == ObserverFired && runB[1].kind == ObserverActivated
         && runB[0].activationSubtick < runB[1].activationSubtick;
+
+    // Push groups: one failed record with full membership.
+    std::vector<PushGroupRecord> groups(footer.pushGroupCount);
+    if (footer.pushGroupCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.pushGroupOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(groups.data()),
+                static_cast<std::streamsize>(footer.pushGroupCount * sizeof(PushGroupRecord)));
+    }
+    std::vector<std::uint64_t> pushMembers(footer.pushMemberCount);
+    if (footer.pushMemberCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.pushMemberOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(pushMembers.data()),
+                static_cast<std::streamsize>(footer.pushMemberCount * sizeof(std::uint64_t)));
+    }
+    ok = ok && groups.size() == 1 && groups[0].succeeded == 0
+        && groups[0].failureReason == FAIL_PUSH_LIMIT_EXCEEDED && groups[0].attemptedCount == 13
+        && groups[0].memberCount == 2 && pushMembers.size() == 2
+        && pushMembers[groups[0].memberOffset] == kA && pushMembers[groups[0].memberOffset + 1] == kB;
+
+    // Initial state + components.
+    std::vector<InitialBlockState> initial(footer.initialCount);
+    if (footer.initialCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.initialOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(initial.data()),
+                static_cast<std::streamsize>(footer.initialCount * sizeof(InitialBlockState)));
+    }
+    std::vector<ComponentRecord> comps(footer.componentCount);
+    if (footer.componentCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.componentOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(comps.data()),
+                static_cast<std::streamsize>(footer.componentCount * sizeof(ComponentRecord)));
+    }
+    ok = ok && initial.size() == 1 && initial[0].stableKey == kA && initial[0].blockTypeId == 165
+        && comps.size() == 1 && comps[0].memberCount == 2;
+
+    // RunSummary: measured fields must have been filled in by close(), logical fields preserved.
+    RunSummary rs;
+    in.seekg(static_cast<std::streamoff>(footer.summaryOffset), std::ios::beg);
+    in.read(reinterpret_cast<char*>(&rs), sizeof(rs));
+    ok = ok && rs.terminationReason == TERM_CYCLE_DETECTED && rs.validCycle == 1 && rs.period == 13
+        && rs.totalEvents == 4 && rs.distinctBlocksWithEvents == 2
+        && rs.maxPushGroupSize == 13 && rs.pushLimitFailureCount == 1;
+
+    if (!ok) {
+        std::cerr << "selftest: SDL3 sections did not round-trip\n";
+    }
 
     std::error_code ec;
     std::filesystem::remove(path, ec);

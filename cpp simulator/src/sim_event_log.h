@@ -28,6 +28,34 @@ enum SimEventKind : std::uint8_t {
     RedstoneBlockRemoved = 6,      // redstone block (subject) removed
     RedstoneActivatedPiston = 7,   // redstone block (subject) powers targetKey piston
     RedstoneDeactivatedPiston = 8, // redstone block (subject) removal unpowers targetKey piston
+    // SDL3 additions (appended, never renumbered):
+    PistonExtendBlocked = 9,       // piston (subject) wanted to extend but could not (see failureReason)
+    PistonRetractBlocked = 10,     // piston (subject) wanted to retract but could not
+    BlockLeftBehind = 11,          // sticky pull failed / block detached from its group (reserved, not yet emitted)
+    BlockDestroyed = 12,           // block pushed into a destroying condition (reserved, not yet emitted)
+    ComponentSplit = 13,           // a connected group tore apart (reserved, not yet emitted)
+    ObserverSuppressed = 14,       // observer fired but had no effect (reserved, not yet emitted)
+    // piston (subject) was notified because SOME neighboring block changed (the generic mechanism
+    // every block placement uses to poke its 6 neighbors - notifyNeighbors/neighborChangedImpl).
+    // This is the catch-all cause: a piston's own head appearing next to its base, a rail forming,
+    // a fence gate toggling nearby, etc. all route through here even when no more specific kind
+    // (ObserverActivated / Redstone*Piston / BlockPushed-self) applies. actorKey = stableKey of the
+    // position that changed (fromPos); reserved0 carries the raw block id that WAS there before the
+    // change (sourceBlockId, 0-255, fits in a byte) so a reader isn't forced to infer it.
+    PistonNeighborNotified = 15,
+};
+
+// SimEvent.failureReason (0 = success/none). Populated on the *Blocked and PistonMoveExecuted(blocked)
+// records, and mirrored onto the PushGroupRecord.
+enum SimFailureReason : std::uint8_t {
+    FAIL_NONE                 = 0,
+    FAIL_PUSH_LIMIT_EXCEEDED  = 1,  // push group would exceed 12; PushGroupRecord.attemptedCount carries the size
+    FAIL_IMMOVABLE_IN_PATH    = 2,  // an immovable block (obsidian, tile entity, extended piston) blocks the path
+    FAIL_NO_SPACE_TO_EXTEND   = 3,
+    FAIL_BLOCK_CANNOT_BE_PUSHED = 4,
+    FAIL_ALREADY_IN_TARGET_STATE = 5,
+    FAIL_NOT_POWERED          = 6,
+    FAIL_OUT_OF_BOUNDS        = 7,
 };
 
 // flags bits
@@ -43,11 +71,30 @@ inline std::uint8_t observerCauseFlags(std::uint8_t cause) { return static_cast<
 
 constexpr std::uint8_t SE_NO_DIRECTION = 0xFF;
 
+// InitialBlockState.movabilityClass / stickinessClass
+constexpr std::uint8_t MOVABILITY_MOVABLE   = 0;
+constexpr std::uint8_t MOVABILITY_IMMOVABLE = 1;
+constexpr std::uint8_t MOVABILITY_POPS       = 2; // pushReaction::Destroy
+constexpr std::uint8_t STICKINESS_NONE       = 0;
+constexpr std::uint8_t STICKINESS_ALL        = 1; // slime
+constexpr std::uint8_t STICKINESS_ALL_EXCEPT_SLIME = 2; // honey (not present in this registry, reserved)
+
+// RunSummary.terminationReason
+enum SimTermination : std::uint8_t {
+    TERM_CYCLE_DETECTED     = 0,
+    TERM_TICK_BUDGET        = 1,
+    TERM_NOTHING_HAPPENED   = 2,
+    TERM_STRUCTURE_DESTROYED = 3,
+    TERM_OUT_OF_BOUNDS      = 4,
+    TERM_INTERNAL_ERROR     = 5,
+};
+
 #pragma pack(push, 1)
 struct SimEvent {
     std::uint64_t blockKey = 0;          // subject: whose log this record belongs to (stable original id)
     std::uint64_t actorKey = 0;          // piston/observer/redstone that caused it (raw pos; 0 = n/a)
     std::uint64_t targetKey = 0;         // pulse target / pushed-block destination (raw pos; 0 = n/a)
+    std::uint64_t globalSeq = 0;         // monotonic across the whole run, never reused (== activationSubtick here)
     std::int64_t  activationTick = 0;    // tick the event became relevant
     std::int64_t  scheduledTick = 0;     // tick the piston move was queued (= activationTick otherwise)
     std::int64_t  executedTick = 0;      // tick it actually moved/fired (= activationTick otherwise)
@@ -55,13 +102,17 @@ struct SimEvent {
     std::uint32_t scheduledSubtick = 0;
     std::uint32_t executedSubtick = 0;
     std::uint32_t pushGroupId = 0;       // shared by every event from one doPistonMove call (0 = n/a)
+    std::int16_t  fromX = 0, fromY = 0, fromZ = 0; // subject position before (== to for non-move events)
+    std::int16_t  toX = 0, toY = 0, toZ = 0;       // subject position after
     std::uint8_t  kind = 0;
     std::uint8_t  direction = SE_NO_DIRECTION; // Facing::index 0-5, 0xFF = n/a
     std::uint8_t  flags = 0;
     std::uint8_t  attemptedAmount = 0;
     std::uint8_t  actualAmount = 0;
+    std::uint8_t  failureReason = 0;     // SimFailureReason; 0 = success
     std::uint8_t  reserved0 = 0;
-    std::uint16_t reserved1 = 0;
+    std::uint8_t  reserved1 = 0;
+    std::uint32_t reserved2 = 0;
 };
 
 struct BlockIndexEntry {
@@ -73,22 +124,112 @@ struct BlockIndexEntry {
     std::uint32_t reserved = 0;
 };
 
+// One record per piston firing ATTEMPT (success or fail). Members index into the flat pushMembers[]
+// array via memberOffset/memberCount. Failed attempts are recorded with full would-be membership.
+struct PushGroupRecord {
+    std::uint64_t globalSeq = 0;
+    std::uint64_t pistonKey = 0;     // stable id of the acting piston
+    std::int32_t  tick = 0;
+    std::uint16_t subtick = 0;
+    std::uint8_t  direction = SE_NO_DIRECTION;
+    std::uint8_t  succeeded = 0;     // 0/1
+    std::uint8_t  failureReason = 0; // SimFailureReason
+    std::uint8_t  pad[3] = {0, 0, 0};
+    std::uint32_t memberCount = 0;
+    std::uint32_t memberOffset = 0;  // index into pushMembers[]
+    std::uint32_t attemptedCount = 0; // real group size (13/14... for over-limit), not the limit
+    std::uint64_t reserved = 0;
+};
+
+// The model's input: one per original block, complete and self-contained (no source-JSON needed).
+struct InitialBlockState {
+    std::uint64_t stableKey = 0;
+    std::int16_t  x = 0, y = 0, z = 0;
+    std::uint16_t blockTypeId = 0;
+    std::uint8_t  facing = SE_NO_DIRECTION;
+    std::uint8_t  stateFlags = 0;      // bit0 extended, bit1 powered, bit2 open (best-effort)
+    std::uint8_t  movabilityClass = 0; // MOVABILITY_*
+    std::uint8_t  stickinessClass = 0; // STICKINESS_*
+    std::int16_t  componentId = -1;
+    std::uint8_t  isTrigger = 0;
+    std::uint8_t  pad = 0;
+    std::uint32_t rawState = 0;        // full state word (type|meta), no second lookup
+    std::uint32_t reserved = 0;
+};
+
+// Connected sticky group at t=0. Members index into the flat componentMembers[] array.
+struct ComponentRecord {
+    std::int16_t  componentId = 0;
+    std::uint8_t  containsImmovable = 0;
+    std::uint8_t  pad = 0;
+    std::uint32_t memberCount = 0;
+    std::int16_t  bboxMin[3] = {0, 0, 0};
+    std::int16_t  bboxMax[3] = {0, 0, 0};
+    std::uint32_t memberOffset = 0;    // index into componentMembers[]
+    std::uint64_t reserved = 0;
+};
+
+// One per run. Also carries the initial-state "header" (bbox / trigger / travel axis) so no separate
+// header section is needed. Simulator sets the logical fields; close() fills the measured-from-log
+// fields (totalEvents, distinctBlocksWithEvents, maxPushGroupSize, pushLimitFailureCount).
+struct RunSummary {
+    std::uint8_t  terminationReason = TERM_INTERNAL_ERROR;
+    std::uint8_t  validCycle = 0;
+    std::int8_t   travelAxis = -1;     // 0=x 1=y 2=z, -1 unknown
+    std::uint8_t  pad = 0;
+    std::int32_t  totalTicks = 0;
+    std::int32_t  period = 0;          // 0 if none
+    std::int16_t  netShift[3] = {0, 0, 0};
+    std::int16_t  bboxMin[3] = {0, 0, 0};
+    std::int16_t  bboxMax[3] = {0, 0, 0};
+    std::int16_t  triggerPos[3] = {0, 0, 0};
+    std::uint32_t totalEvents = 0;
+    std::uint32_t distinctBlocksWithEvents = 0;
+    std::uint32_t maxObserverChainDepth = 0; // not computed yet (0); upgrade if the model needs it
+    std::uint32_t maxPushGroupSize = 0;
+    std::uint32_t pushLimitFailureCount = 0;
+    std::uint32_t blockCount = 0;      // number of original blocks (== InitialBlockState count)
+    std::uint32_t reserved = 0;
+};
+
+// EOF footer. Readers seek from the end. Carries offset+count for every section.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '2'};
-    std::uint32_t version = 2;
+    char          magic[4] = {'S', 'D', 'L', '3'};
+    std::uint32_t formatVersion = 3;
+    std::uint64_t simulatorBuildHash = 0;
+    std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;
     std::uint64_t blockIndexOffset = 0;
     std::uint32_t blockCount = 0;
     std::uint32_t eventRecSize = sizeof(SimEvent);
     std::uint32_t blockRecSize = sizeof(BlockIndexEntry);
-    std::uint32_t reserved = 0;
-    std::uint64_t reserved2 = 0;
+    std::uint64_t pushGroupOffset = 0;
+    std::uint32_t pushGroupCount = 0;
+    std::uint32_t pushGroupRecSize = sizeof(PushGroupRecord);
+    std::uint64_t pushMemberOffset = 0;
+    std::uint32_t pushMemberCount = 0;
+    std::uint32_t pad0 = 0;
+    std::uint64_t initialOffset = 0;
+    std::uint32_t initialCount = 0;
+    std::uint32_t initialRecSize = sizeof(InitialBlockState);
+    std::uint64_t componentOffset = 0;
+    std::uint32_t componentCount = 0;
+    std::uint32_t componentRecSize = sizeof(ComponentRecord);
+    std::uint64_t componentMemberOffset = 0;
+    std::uint32_t componentMemberCount = 0;
+    std::uint32_t summaryRecSize = sizeof(RunSummary);
+    std::uint64_t summaryOffset = 0;
+    std::uint64_t reserved = 0;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SimEvent) == 72, "SimEvent must be 72 bytes");
+static_assert(sizeof(SimEvent) == 96, "SimEvent must be 96 bytes");
 static_assert(sizeof(BlockIndexEntry) == 32, "BlockIndexEntry must be 32 bytes");
-static_assert(sizeof(SimLogFooter) == 48, "SimLogFooter must be 48 bytes");
+static_assert(sizeof(PushGroupRecord) == 48, "PushGroupRecord must be 48 bytes");
+static_assert(sizeof(InitialBlockState) == 32, "InitialBlockState must be 32 bytes");
+static_assert(sizeof(ComponentRecord) == 32, "ComponentRecord must be 32 bytes");
+static_assert(sizeof(RunSummary) == 64, "RunSummary must be 64 bytes");
+static_assert(sizeof(SimLogFooter) == 148, "SimLogFooter must be 148 bytes");
 static_assert(std::is_standard_layout<SimEvent>::value, "SimEvent must be standard-layout");
 
 struct QueueInfo {
@@ -101,7 +242,7 @@ class SimEventLog {
 public:
     void open(const std::string& path);   // closes previous if open, resets buffers
     bool enabled() const { return out_.is_open(); }
-    void close();                           // group by block, write events + index + footer
+    void close();                           // group by block, write all sections + footer
 
     ~SimEventLog() { if (enabled()) close(); }
 
@@ -114,10 +255,24 @@ public:
     void noteQueued(std::uint64_t pistonKey, bool extend, std::int64_t tick, std::uint32_t subtick);
     QueueInfo takeQueued(std::uint64_t pistonKey, bool extend);
 
-    void push(const SimEvent& ev) { buffer_.push_back(ev); }
+    // globalSeq always mirrors activationSubtick here (one monotonic counter for the whole run) -
+    // set centrally so every call site gets it for free instead of repeating it at each emit.
+    void push(SimEvent ev) { ev.globalSeq = ev.activationSubtick; buffer_.push_back(ev); }
 
-    // Self-check: round-trips synthetic interleaved events through a temp file + inline reader,
-    // asserts each block's run reconstructs complete and in order. Returns true on PASS.
+    // SDL3 section setters, called by the simulator.
+    void addPushGroup(std::uint64_t globalSeq, std::uint64_t pistonKey, std::int32_t tick,
+                      std::uint16_t subtick, std::uint8_t direction, bool succeeded,
+                      std::uint8_t failureReason, std::uint32_t attemptedCount,
+                      const std::vector<std::uint64_t>& members);
+    void setInitialState(std::vector<InitialBlockState> initial) { initial_ = std::move(initial); }
+    void setComponents(std::vector<ComponentRecord> components, std::vector<std::uint64_t> members) {
+        components_ = std::move(components);
+        componentMembers_ = std::move(members);
+    }
+    void setSummary(const RunSummary& summary) { summary_ = summary; hasSummary_ = true; }
+
+    // Self-check: round-trips synthetic events + one of every new section through a temp file + inline
+    // reader, asserts each reconstructs correctly. Returns true on PASS.
     static bool selfTest();
 
 private:
@@ -126,6 +281,13 @@ private:
     std::uint32_t nextPushGroupId_ = 0;
     std::vector<SimEvent> buffer_;
     std::vector<BlockIndexEntry> blockIndex_;
+    std::vector<PushGroupRecord> pushGroups_;
+    std::vector<std::uint64_t> pushMembers_;
+    std::vector<InitialBlockState> initial_;
+    std::vector<ComponentRecord> components_;
+    std::vector<std::uint64_t> componentMembers_;
+    RunSummary summary_;
+    bool hasSummary_ = false;
     std::unordered_map<std::uint64_t, std::size_t> indexOf_;      // originalKey -> blockIndex_ slot
     std::unordered_map<std::uint64_t, QueueInfo> pendingQueue_;   // (pistonKey<<1|extend) -> queue timing
 

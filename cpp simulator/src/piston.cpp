@@ -97,6 +97,8 @@ PistonStructureHelper::PistonStructureHelper(const World& world, BlockPos piston
 bool PistonStructureHelper::canMove() {
     moveCount_ = 0;
     destroyCount_ = 0;
+    failReason_ = 0;  // FAIL_NONE
+    attemptedOverLimit_ = 0;
 
     std::uint32_t state = world_.getBlock(blockToMove_);
     if (!canPush(state, world_, blockToMove_, moveDirection_, false, moveDirection_)) {
@@ -104,6 +106,7 @@ bool PistonStructureHelper::canMove() {
             toDestroy_[static_cast<std::size_t>(destroyCount_++)] = blockToMove_;
             return true;
         }
+        failReason_ = 2;  // FAIL_IMMOVABLE_IN_PATH
         return false;
     }
 
@@ -139,6 +142,8 @@ bool PistonStructureHelper::addBlockLine(BlockPos origin, const Facing& branchFa
 
     int i = 1;
     if (i + moveCount_ > 12) {
+        failReason_ = 1;  // FAIL_PUSH_LIMIT_EXCEEDED
+        attemptedOverLimit_ = i + moveCount_;
         return false;
     }
 
@@ -156,6 +161,8 @@ bool PistonStructureHelper::addBlockLine(BlockPos origin, const Facing& branchFa
 
         ++i;
         if (i + moveCount_ > 12) {
+            failReason_ = 1;  // FAIL_PUSH_LIMIT_EXCEEDED
+            attemptedOverLimit_ = i + moveCount_;
             return false;
         }
     }
@@ -189,6 +196,7 @@ bool PistonStructureHelper::addBlockLine(BlockPos origin, const Facing& branchFa
 
         if (!canPush(state, world_, forward, moveDirection_, true, moveDirection_)
                 || samePos(forward, pistonPos_)) {
+            failReason_ = 2;  // FAIL_IMMOVABLE_IN_PATH
             return false;
         }
 
@@ -198,6 +206,8 @@ bool PistonStructureHelper::addBlockLine(BlockPos origin, const Facing& branchFa
         }
 
         if (moveCount_ >= 12) {
+            failReason_ = 1;  // FAIL_PUSH_LIMIT_EXCEEDED
+            attemptedOverLimit_ = moveCount_ + 1;
             return false;
         }
 

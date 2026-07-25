@@ -146,6 +146,46 @@ Result Simulator::simulate(const Candidate& candidate) {
                 }
             }
         }
+
+        // simulation_data (SDL3): RunSummary. result.cycles is only ever set true once a repeat is
+        // actually found (see the found!=nullptr branch above), so its default (false) already
+        // distinguishes "ran out of ticks" from "found a cycle" without re-deriving `found` here.
+        if (eventLog_ != nullptr) {
+            RunSummary rs;
+            rs.terminationReason = !triggerFired ? TERM_NOTHING_HAPPENED
+                                  : (result.cycles ? TERM_CYCLE_DETECTED : TERM_TICK_BUDGET);
+            rs.validCycle = result.validCycle ? 1 : 0;
+            rs.totalTicks = result.ticks;
+            rs.period = result.period;
+            rs.netShift[0] = static_cast<std::int16_t>(result.shift.x);
+            rs.netShift[1] = static_cast<std::int16_t>(result.shift.y);
+            rs.netShift[2] = static_cast<std::int16_t>(result.shift.z);
+            rs.travelAxis = -1;
+            if (rs.netShift[0] != 0) rs.travelAxis = 0;
+            else if (rs.netShift[1] != 0) rs.travelAxis = 1;
+            else if (rs.netShift[2] != 0) rs.travelAxis = 2;
+            rs.triggerPos[0] = static_cast<std::int16_t>(candidate.trigger.x);
+            rs.triggerPos[1] = static_cast<std::int16_t>(candidate.trigger.y);
+            rs.triggerPos[2] = static_cast<std::int16_t>(candidate.trigger.z);
+            if (!candidate.blocks.empty()) {
+                std::int16_t bmin[3] = {static_cast<std::int16_t>(candidate.blocks[0].x),
+                                        static_cast<std::int16_t>(candidate.blocks[0].y),
+                                        static_cast<std::int16_t>(candidate.blocks[0].z)};
+                std::int16_t bmax[3] = {bmin[0], bmin[1], bmin[2]};
+                for (const BlockEntry& b : candidate.blocks) {
+                    bmin[0] = std::min(bmin[0], static_cast<std::int16_t>(b.x));
+                    bmin[1] = std::min(bmin[1], static_cast<std::int16_t>(b.y));
+                    bmin[2] = std::min(bmin[2], static_cast<std::int16_t>(b.z));
+                    bmax[0] = std::max(bmax[0], static_cast<std::int16_t>(b.x));
+                    bmax[1] = std::max(bmax[1], static_cast<std::int16_t>(b.y));
+                    bmax[2] = std::max(bmax[2], static_cast<std::int16_t>(b.z));
+                }
+                rs.bboxMin[0] = bmin[0]; rs.bboxMin[1] = bmin[1]; rs.bboxMin[2] = bmin[2];
+                rs.bboxMax[0] = bmax[0]; rs.bboxMax[1] = bmax[1]; rs.bboxMax[2] = bmax[2];
+            }
+            rs.blockCount = static_cast<std::uint32_t>(candidate.blocks.size());
+            eventLog_->setSummary(rs);
+        }
     } catch (const std::exception& error) {
         result.ok = false;
         result.errorCode = "simulation_error";
@@ -482,6 +522,25 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
         if (trace_ != nullptr) {
             trace_->logState(world_, "p.nc", &pos, state);
             trace_->logBlock(world_, "p.src", &fromPos, sourceBlockId);
+        }
+        if (eventLog_ != nullptr) {
+            // Generic catch-all cause: this is the ONE choke point every neighbor-notify path
+            // (notifyNeighbors' 6-neighbor poke, a piston-head forwarding to its base, a direct
+            // neighborChanged call) funnels through before a piston re-checks its power. Logging it
+            // here - rather than only at the specific sources (redstone/observer) - guarantees every
+            // piston re-check has SOME upstream cause in the log, including cases those specific
+            // sources don't cover (e.g. a piston's own head placement notifying its own base).
+            SimEvent ev;
+            ev.blockKey = stableKey(pos);
+            ev.actorKey = stableKey(fromPos);
+            ev.kind = PistonNeighborNotified;
+            ev.reserved0 = static_cast<std::uint8_t>(sourceBlockId & 0xFF);
+            std::uint32_t order = eventLog_->nextOrder();
+            ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+            ev.fromX = static_cast<std::int16_t>(fromPos.x); ev.fromY = static_cast<std::int16_t>(fromPos.y); ev.fromZ = static_cast<std::int16_t>(fromPos.z);
+            ev.toX = static_cast<std::int16_t>(pos.x); ev.toY = static_cast<std::int16_t>(pos.y); ev.toZ = static_cast<std::int16_t>(pos.z);
+            eventLog_->push(ev);
         }
         checkForMove(pos, state);
     } else if (id == BLOCK_FENCE_GATE) {
@@ -1328,6 +1387,10 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
     PistonStructureHelper helper(world_, pos, direction, extending);
     if (!helper.canMove()) {
         if (eventLog_ != nullptr) {
+            BlockPos front = offset(pos, direction);
+            std::uint8_t failReason = helper.failReason();
+            std::uint32_t order = eventLog_->nextOrder();
+
             SimEvent ev;
             ev.blockKey = pistonSubject;
             ev.actorKey = pistonSubject;
@@ -1335,12 +1398,32 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             ev.direction = static_cast<std::uint8_t>(direction.index);
             ev.flags = extending ? SEF_EXTEND : 0;  // SEF_SUCCESS clear = blocked
             ev.pushGroupId = pushGroup;
-            std::uint32_t order = eventLog_->nextOrder();
+            ev.failureReason = failReason;
+            ev.fromX = static_cast<std::int16_t>(pos.x); ev.fromY = static_cast<std::int16_t>(pos.y); ev.fromZ = static_cast<std::int16_t>(pos.z);
+            ev.toX = static_cast<std::int16_t>(front.x); ev.toY = static_cast<std::int16_t>(front.y); ev.toZ = static_cast<std::int16_t>(front.z);
             ev.activationTick = ev.executedTick = world_.time;
             ev.activationSubtick = ev.executedSubtick = order;
+            ev.globalSeq = order;
             ev.scheduledTick = queued.found ? queued.tick : world_.time;
             ev.scheduledSubtick = queued.found ? queued.subtick : order;
             eventLog_->push(ev);
+
+            // Emit the failure as its own legible kind (highest training value per SDL3 spec).
+            SimEvent fail = ev;
+            fail.kind = extending ? PistonExtendBlocked : PistonRetractBlocked;
+            fail.globalSeq = fail.activationSubtick = fail.executedSubtick = eventLog_->nextOrder();
+            eventLog_->push(fail);
+
+            // Failed push-group record with full would-be membership - the informative case.
+            std::vector<std::uint64_t> members;
+            int attempted = helper.attemptedOverLimit() > 0 ? helper.attemptedOverLimit() : helper.moveCount();
+            for (int i = 0; i < helper.moveCount(); ++i) {
+                members.push_back(stableKey(helper.moveAt(i)));
+            }
+            eventLog_->addPushGroup(fail.globalSeq, pistonSubject, static_cast<std::int32_t>(world_.time),
+                                    static_cast<std::uint16_t>(fail.globalSeq & 0xFFFF),
+                                    static_cast<std::uint8_t>(direction.index), /*succeeded*/ false,
+                                    failReason, static_cast<std::uint32_t>(attempted), members);
         }
         return false;
     }
@@ -1349,6 +1432,7 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
     const int destroyCount = helper.destroyCount();
 
     if (eventLog_ != nullptr) {
+        BlockPos front = offset(pos, direction);
         SimEvent ev;
         ev.blockKey = pistonSubject;
         ev.actorKey = pistonSubject;
@@ -1358,12 +1442,25 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
         ev.pushGroupId = pushGroup;
         ev.attemptedAmount = static_cast<std::uint8_t>(moveCount);
         ev.actualAmount = static_cast<std::uint8_t>(moveCount);
+        ev.fromX = static_cast<std::int16_t>(pos.x); ev.fromY = static_cast<std::int16_t>(pos.y); ev.fromZ = static_cast<std::int16_t>(pos.z);
+        ev.toX = static_cast<std::int16_t>(front.x); ev.toY = static_cast<std::int16_t>(front.y); ev.toZ = static_cast<std::int16_t>(front.z);
         std::uint32_t order = eventLog_->nextOrder();
         ev.activationTick = ev.executedTick = world_.time;
         ev.activationSubtick = ev.executedSubtick = order;
+        ev.globalSeq = order;
         ev.scheduledTick = queued.found ? queued.tick : world_.time;
         ev.scheduledSubtick = queued.found ? queued.subtick : order;
         eventLog_->push(ev);
+
+        // Successful push-group record (membership known before positions are mutated below).
+        std::vector<std::uint64_t> members;
+        for (int i = 0; i < moveCount; ++i) {
+            members.push_back(stableKey(helper.moveAt(i)));
+        }
+        eventLog_->addPushGroup(order, pistonSubject, static_cast<std::int32_t>(world_.time),
+                                static_cast<std::uint16_t>(order & 0xFFFF),
+                                static_cast<std::uint8_t>(direction.index), /*succeeded*/ true,
+                                /*failureReason*/ 0, static_cast<std::uint32_t>(moveCount), members);
     }
 
     if (trace_ != nullptr) {
@@ -1461,9 +1558,12 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             ev.pushGroupId = pushGroup;
             ev.attemptedAmount = static_cast<std::uint8_t>(moveCount);
             ev.actualAmount = static_cast<std::uint8_t>(moveCount);
+            ev.fromX = static_cast<std::int16_t>(source.x); ev.fromY = static_cast<std::int16_t>(source.y); ev.fromZ = static_cast<std::int16_t>(source.z);
+            ev.toX = static_cast<std::int16_t>(target.x); ev.toY = static_cast<std::int16_t>(target.y); ev.toZ = static_cast<std::int16_t>(target.z);
             std::uint32_t order = eventLog_->nextOrder();
             ev.activationTick = ev.executedTick = world_.time;
             ev.activationSubtick = ev.executedSubtick = order;
+            ev.globalSeq = order;
             ev.scheduledTick = queued.found ? queued.tick : world_.time;
             ev.scheduledSubtick = queued.found ? queued.subtick : order;
             eventLog_->push(ev);
@@ -2189,6 +2289,104 @@ void Simulator::loadCandidate(const Candidate& candidate) {
                 logRedstonePistonScan(unpackPos(e.key), true);
             }
         }
+    }
+
+    // simulation_data (SDL3): canonical initial state (the model's input) + t=0 sticky components.
+    if (eventLog_ != nullptr) {
+        std::vector<InitialBlockState> initial;
+        initial.reserve(world_.blocks.entries().size());
+        std::unordered_map<std::uint64_t, int> keyToInitialIdx;
+        for (const auto& e : world_.blocks.entries()) {
+            BlockPos p = unpackPos(e.key);
+            int id = blockId(e.state);
+            const BlockData& bd = blockData(id);
+            InitialBlockState ib;
+            ib.stableKey = e.key;
+            ib.x = static_cast<std::int16_t>(p.x);
+            ib.y = static_cast<std::int16_t>(p.y);
+            ib.z = static_cast<std::int16_t>(p.z);
+            ib.blockTypeId = static_cast<std::uint16_t>(id);
+            ib.facing = static_cast<std::uint8_t>(facingMeta(e.state));
+            ib.stateFlags = static_cast<std::uint8_t>(
+                (metaBit(e.state, 3) ? 1 : 0) |          // bit0: piston "extended" meta bit
+                (isNormalPowerSource(e.state) ? 2 : 0)); // bit1: statically powers neighbors
+            if (isPistonBlock(id)) {
+                // canPush() special-cases pistons: it never consults their registry pushReaction
+                // (both are tabled as Block, but that's dead code for this id - see piston.cpp's
+                // `if (!isPistonBlock(id)) { ...switch(pushReaction)... } else if (metaBit(state,3))`)
+                // - a piston is only immovable while extended, matching that exact rule here.
+                ib.movabilityClass = metaBit(e.state, 3) ? MOVABILITY_IMMOVABLE : MOVABILITY_MOVABLE;
+            } else if (id == BLOCK_OBSIDIAN || bd.hardness == -1.0f || bd.pushReaction == PushReaction::Block) {
+                ib.movabilityClass = MOVABILITY_IMMOVABLE;
+            } else if (bd.pushReaction == PushReaction::Destroy) {
+                ib.movabilityClass = MOVABILITY_POPS;
+            } else {
+                ib.movabilityClass = MOVABILITY_MOVABLE;
+            }
+            ib.stickinessClass = (id == BLOCK_SLIME) ? STICKINESS_ALL : STICKINESS_NONE;
+            ib.componentId = -1;  // filled by the flood-fill below
+            ib.isTrigger = samePos(p, candidate.trigger) ? 1 : 0;
+            ib.rawState = e.state;
+            keyToInitialIdx[e.key] = static_cast<int>(initial.size());
+            initial.push_back(ib);
+        }
+
+        // ponytail: sticky components use only the slime rule (this registry has no honey block) -
+        // an edge exists between adjacent blocks when at least one is slime and neither is immovable.
+        // Upgrade if a honey block is ever added to block_registry.cpp.
+        std::vector<ComponentRecord> components;
+        std::vector<std::uint64_t> componentMembers;
+        std::unordered_map<std::uint64_t, bool> visited;
+        std::int16_t nextComponentId = 0;
+        static const BlockPos kNeighborDeltas[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        for (const auto& startEntry : initial) {
+            if (visited[startEntry.stableKey]) continue;
+            std::vector<std::uint64_t> stack{startEntry.stableKey};
+            visited[startEntry.stableKey] = true;
+            std::vector<std::uint64_t> members;
+            bool containsImmovable = false;
+            std::int16_t bmin[3] = {startEntry.x, startEntry.y, startEntry.z};
+            std::int16_t bmax[3] = {startEntry.x, startEntry.y, startEntry.z};
+            while (!stack.empty()) {
+                std::uint64_t key = stack.back();
+                stack.pop_back();
+                members.push_back(key);
+                const InitialBlockState& cur = initial[static_cast<std::size_t>(keyToInitialIdx.at(key))];
+                if (cur.movabilityClass == MOVABILITY_IMMOVABLE) containsImmovable = true;
+                bmin[0] = std::min(bmin[0], cur.x); bmax[0] = std::max(bmax[0], cur.x);
+                bmin[1] = std::min(bmin[1], cur.y); bmax[1] = std::max(bmax[1], cur.y);
+                bmin[2] = std::min(bmin[2], cur.z); bmax[2] = std::max(bmax[2], cur.z);
+                if (cur.movabilityClass == MOVABILITY_IMMOVABLE) continue;  // never bridges to neighbors
+                bool curIsSlime = cur.stickinessClass == STICKINESS_ALL;
+                for (const BlockPos& d : kNeighborDeltas) {
+                    std::uint64_t nkey = packPos(cur.x + d.x, cur.y + d.y, cur.z + d.z);
+                    auto nit = keyToInitialIdx.find(nkey);
+                    if (nit == keyToInitialIdx.end() || visited[nkey]) continue;
+                    const InitialBlockState& nb = initial[static_cast<std::size_t>(nit->second)];
+                    if (nb.movabilityClass == MOVABILITY_IMMOVABLE) continue;
+                    bool nIsSlime = nb.stickinessClass == STICKINESS_ALL;
+                    if (!curIsSlime && !nIsSlime) continue;  // sticky rule: at least one side is slime
+                    visited[nkey] = true;
+                    stack.push_back(nkey);
+                }
+            }
+            ComponentRecord cr;
+            cr.componentId = nextComponentId;
+            cr.containsImmovable = containsImmovable ? 1 : 0;
+            cr.memberCount = static_cast<std::uint32_t>(members.size());
+            cr.memberOffset = static_cast<std::uint32_t>(componentMembers.size());
+            cr.bboxMin[0] = bmin[0]; cr.bboxMin[1] = bmin[1]; cr.bboxMin[2] = bmin[2];
+            cr.bboxMax[0] = bmax[0]; cr.bboxMax[1] = bmax[1]; cr.bboxMax[2] = bmax[2];
+            for (std::uint64_t m : members) {
+                initial[static_cast<std::size_t>(keyToInitialIdx.at(m))].componentId = nextComponentId;
+                componentMembers.push_back(m);
+            }
+            components.push_back(cr);
+            ++nextComponentId;
+        }
+
+        eventLog_->setInitialState(std::move(initial));
+        eventLog_->setComponents(std::move(components), std::move(componentMembers));
     }
 
     if (trace_ != nullptr) {
