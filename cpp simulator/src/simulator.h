@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <string>
 
@@ -175,6 +176,16 @@ private:
     void logObserverActivations(BlockPos observerPos, std::uint32_t state);
     void logRedstonePistonScan(BlockPos redstonePos, bool activating);
     bool shouldPistonBeExtended(BlockPos pos, std::uint32_t state) const;
+    // simulation_data (SDL4): static "would_power" relation. Mirrors redstonePower()'s exact
+    // resolution order (weakPower / strongPowerAll->strongPower) but also reports WHICH position
+    // supplied the power, instead of just a magnitude - used only to build the static relation, not
+    // for live triggering (which still goes through isSidePowered/redstonePower as before).
+    bool findPowerSource(BlockPos probePos, const Facing& side, BlockPos& outSource) const;
+    // Mirrors shouldPistonBeExtended()'s exact probe geometry (6 sides, then down, then up's 5
+    // sides for QC) but collects every contributing source instead of early-returning on the first
+    // hit - used only to build the static would-power relation at load time.
+    void findWouldPowerPiston(BlockPos pos, std::uint32_t state,
+                               std::vector<std::pair<BlockPos, bool>>& sources) const;
     void railNeighborChanged(BlockPos pos, std::uint32_t state);
     void updateRailPowerState(BlockPos pos, std::uint32_t state, int railId, int shape);
     // Mirrors BlockRailBase.onBlockAdded / BlockRailBase.Rail: recomputes a rail's own shape

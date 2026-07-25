@@ -897,6 +897,59 @@ int Simulator::strongPowerAll(BlockPos pos) const {
     return out;
 }
 
+bool Simulator::findPowerSource(BlockPos probePos, const Facing& side, BlockPos& outSource) const {
+    std::uint32_t state = world_.getBlock(probePos);
+    if (blockData(blockId(state)).isNormalCube) {
+        // Mirrors redstonePower()'s normal-cube branch (strongPowerAll), but instead of just the
+        // magnitude, finds WHICH neighbor of this relay cube actually supplies it.
+        if (ncPowerSet_.empty()) return false;
+        for (const Facing& facing : facings()) {
+            BlockPos neighbor = offset(probePos, facing);
+            if (strongPower(neighbor, facing) > 0) {
+                outSource = neighbor;
+                return true;
+            }
+        }
+        return false;
+    }
+    if (weakPower(state, side) > 0) {
+        outSource = probePos;
+        return true;
+    }
+    return false;
+}
+
+void Simulator::findWouldPowerPiston(BlockPos pos, std::uint32_t state,
+                                      std::vector<std::pair<BlockPos, bool>>& sources) const {
+    // Mirrors shouldPistonBeExtended()'s exact probe geometry (see that function): 6 sides minus the
+    // piston's own facing, then an explicit down-check, then the 5 non-down sides of the block above
+    // (the QC path) - but collects every contributing source (viaQC flag per probe) instead of
+    // early-returning on the first hit. Used only to build the static would_power relation at load
+    // time; live triggering still goes through shouldPistonBeExtended/isSidePowered unchanged.
+    const Facing& pistonFacing = facingByIndex(facingMeta(state));
+    BlockPos src;
+    for (const Facing& facing : facings()) {
+        if (facing.index != pistonFacing.index) {
+            BlockPos probe = offset(pos, facing);
+            if (findPowerSource(probe, facing, src)) {
+                sources.emplace_back(src, false);
+            }
+        }
+    }
+    if (findPowerSource(pos, facings()[0], src)) {
+        sources.emplace_back(src, false);
+    }
+    BlockPos up{pos.x, pos.y + 1, pos.z};
+    for (const Facing& facing : facings()) {
+        if (facing.index != 0) {
+            BlockPos probe = offset(up, facing);
+            if (findPowerSource(probe, facing, src)) {
+                sources.emplace_back(src, true);
+            }
+        }
+    }
+}
+
 // Mirrors BlockRailBase.neighborChanged: breaks the rail if it's no longer supported
 // (nothing solid below it, or below the raised end for an ascending slope), otherwise
 // hands off to the powered-rail redstone relay for golden/activator rails.
@@ -2384,6 +2437,85 @@ void Simulator::loadCandidate(const Candidate& candidate) {
             components.push_back(cr);
             ++nextComponentId;
         }
+
+        // simulation_data (SDL4): static would_power relation + static push-group preview. Both are
+        // computed once here, ahead of any trigger/tick, from the simulator's own already-correct
+        // resolution code - not reimplemented in Python - so they're available for every piston
+        // regardless of whether it ever actually fires during the observed run (see sim_event_log.h's
+        // WouldPowerEdge / PushGroupRecord doc comments for why this matters to the model).
+        std::vector<WouldPowerEdge> wouldPowerEdges;
+        std::vector<PushGroupRecord> staticPreviews;
+        std::vector<std::uint64_t> staticPreviewMembers;
+        for (const auto& e : world_.blocks.entries()) {
+            int id = blockId(e.state);
+            if (id != BLOCK_PISTON && id != BLOCK_STICKY_PISTON) {
+                continue;
+            }
+            BlockPos pistonPos = unpackPos(e.key);
+            std::uint64_t pistonKey = stableKey(pistonPos);
+
+            std::vector<std::pair<BlockPos, bool>> sources;
+            findWouldPowerPiston(pistonPos, e.state, sources);
+            for (const auto& [sourcePos, viaQC] : sources) {
+                std::uint64_t sourceKey = stableKey(sourcePos);
+                bool alreadyHave = false;
+                for (const WouldPowerEdge& existing : wouldPowerEdges) {
+                    if (existing.sourceKey == sourceKey && existing.pistonKey == pistonKey
+                            && existing.viaQC == (viaQC ? 1 : 0)) {
+                        alreadyHave = true;
+                        break;
+                    }
+                }
+                if (alreadyHave) continue;
+                WouldPowerEdge edge;
+                edge.sourceKey = sourceKey;
+                edge.pistonKey = pistonKey;
+                edge.viaQC = viaQC ? 1 : 0;
+                wouldPowerEdges.push_back(edge);
+            }
+
+            // Preview whichever action this piston's current extended state implies is next: extend
+            // if retracted, retract if extended. (Both directions aren't previewed - a retracted
+            // piston "retracting" isn't a physically meaningful scenario.)
+            bool extending = !metaBit(e.state, 3);
+            const Facing& pistonFacing = facingByIndex(facingMeta(e.state));
+
+            PushGroupRecord preview;
+            preview.pistonKey = pistonKey;
+            preview.direction = static_cast<std::uint8_t>(pistonFacing.index);
+            preview.memberOffset = static_cast<std::uint32_t>(staticPreviewMembers.size());
+
+            // A NON-sticky piston's retract never goes through PistonStructureHelper/canMove() in the
+            // real simulator (pistonEventReceived's retract branch does a plain setBlockToAir for the
+            // non-sticky case) - previewing it via canMove() would describe a scenario the simulator
+            // never actually executes. Only sticky retraction (and every extend, sticky or not) really
+            // goes through canMove(), so mirror exactly that: synthesize a trivial "nothing moves"
+            // preview for the non-sticky-retract case instead of a helper call.
+            if (!extending && !isStickyPistonBlock(id)) {
+                preview.succeeded = 1;
+                preview.attemptedCount = 0;
+                preview.memberCount = 0;
+            } else {
+                PistonStructureHelper helper(world_, pistonPos, pistonFacing, extending);
+                bool canMove = helper.canMove();
+                preview.succeeded = canMove ? 1 : 0;
+                preview.failureReason = canMove ? 0 : helper.failReason();
+                preview.attemptedCount = canMove
+                    ? static_cast<std::uint32_t>(helper.moveCount())
+                    : static_cast<std::uint32_t>(helper.attemptedOverLimit() > 0
+                        ? helper.attemptedOverLimit() : helper.moveCount());
+                // Record membership on BOTH success and failure - a failed group's partial membership
+                // (however far it got before hitting the limit/obstruction) is informative too,
+                // matching the same convention used for the dynamic (runtime) push-group records.
+                for (int i = 0; i < helper.moveCount(); ++i) {
+                    staticPreviewMembers.push_back(stableKey(helper.moveAt(i)));
+                }
+                preview.memberCount = static_cast<std::uint32_t>(helper.moveCount());
+            }
+            staticPreviews.push_back(preview);
+        }
+        eventLog_->setWouldPower(std::move(wouldPowerEdges));
+        eventLog_->setStaticPushPreview(std::move(staticPreviews), std::move(staticPreviewMembers));
 
         eventLog_->setInitialState(std::move(initial));
         eventLog_->setComponents(std::move(components), std::move(componentMembers));

@@ -13,15 +13,23 @@ Usage:
     py verify_simulation_data.py --self-check            # decode round-trip assert, no exe needed
 
 On-disk layout (must stay in sync with cpp simulator/src/sim_event_log.h):
-    event section      : N x SimEvent (96 bytes), grouped by block, each block's run in sim order
-    block index        : B x BlockIndexEntry (32 bytes), sorted by originalKey
-    push-group section : G x PushGroupRecord (48 bytes), one per piston firing attempt
-    push-group members : flat uint64 array, indexed via memberOffset/memberCount
-    initial-state       : one InitialBlockState (32 bytes) per original block - the model's input
-    component section   : one ComponentRecord (32 bytes) per t=0 sticky group
-    component members   : flat uint64 array, indexed via memberOffset/memberCount
-    run summary         : one RunSummary (64 bytes)
-    footer              : 148 bytes, magic "SDL3", offsets/counts for every section above
+    event section        : N x SimEvent (96 bytes), grouped by block, each block's run in sim order
+    block index          : B x BlockIndexEntry (32 bytes), sorted by originalKey
+    push-group section   : G x PushGroupRecord (48 bytes), one per piston firing ATTEMPT during the run
+    push-group members   : flat uint64 array, indexed via memberOffset/memberCount
+    initial-state        : one InitialBlockState (32 bytes) per original block - the model's input
+    component section    : one ComponentRecord (32 bytes) per t=0 sticky group
+    component members    : flat uint64 array, indexed via memberOffset/memberCount
+    run summary          : one RunSummary (64 bytes)
+    would-power section  : W x WouldPowerEdge (24 bytes) - static "would_power" relation, computed
+                            once at load from the simulator's own power-resolution code, independent
+                            of whether the activation ever actually happens during the run
+    static push preview  : one PushGroupRecord (reused type) per piston, previewing whichever action
+                            (extend/retract) its t=0 state implies is next - covers pistons that never
+                            actually fire during the observed run, unlike the dynamic section above
+    static push members   : flat uint64 array for the section above, indexed the same way, but a
+                            SEPARATE array from the dynamic push-group members
+    footer                : 188 bytes, magic "SDL4", offsets/counts for every section above
 """
 from __future__ import annotations
 
@@ -49,14 +57,16 @@ _PUSHGROUP = struct.Struct("<QQiHBBBBBBIIIQ")           # 48 bytes
 _INITIAL = struct.Struct("<QhhhHBBBBhBBII")             # 32 bytes
 _COMPONENT = struct.Struct("<hBBIhhhhhhIQ")             # 32 bytes
 _SUMMARY = struct.Struct("<BBbBii" + "h" * 12 + "I" * 7)  # 64 bytes
-_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQ")  # 148 bytes
+_WOULDPOWER = struct.Struct("<QQB7x")                   # 24 bytes (7x = 7 pad bytes)
+_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDL4)
 assert _EVENT.size == 96, _EVENT.size
 assert _INDEX.size == 32, _INDEX.size
 assert _PUSHGROUP.size == 48, _PUSHGROUP.size
 assert _INITIAL.size == 32, _INITIAL.size
 assert _COMPONENT.size == 32, _COMPONENT.size
 assert _SUMMARY.size == 64, _SUMMARY.size
-assert _FOOTER.size == 148, _FOOTER.size
+assert _WOULDPOWER.size == 24, _WOULDPOWER.size
+assert _FOOTER.size == 188, _FOOTER.size
 
 KIND_NAMES = {
     0: "PistonQueued", 1: "PistonMoveExecuted", 2: "BlockPushed", 3: "ObserverFired",
@@ -173,14 +183,24 @@ class RunSummary:
         self.triggerPos = (tx, ty, tz)
 
 
+class WouldPowerEdge:
+    __slots__ = ("sourceKey", "pistonKey", "viaQC")
+
+    def __init__(self, raw: tuple):
+        self.sourceKey, self.pistonKey, self.viaQC = raw
+
+
 def read_footer(data: bytes) -> dict:
     (magic, version, sim_build_hash, gen_seed, event_count, block_index_off, block_count, ev_sz,
      blk_sz, push_group_off, push_group_count, push_group_sz, push_member_off, push_member_count,
      _pad0, initial_off, initial_count, initial_sz, component_off, component_count, component_sz,
-     component_member_off, component_member_count, summary_sz, summary_off, _r) = \
+     component_member_off, component_member_count, summary_sz, summary_off,
+     would_power_off, would_power_count, would_power_sz,
+     static_push_group_off, static_push_group_count, static_push_member_count,
+     static_push_member_off, _r) = \
         _FOOTER.unpack_from(data, len(data) - _FOOTER.size)
-    if magic != b"SDL3":
-        raise ValueError(f"bad magic {magic!r} (expected SDL3)")
+    if magic != b"SDL4":
+        raise ValueError(f"bad magic {magic!r} (expected SDL4)")
     if ev_sz != _EVENT.size or blk_sz != _INDEX.size:
         raise ValueError(f"record size mismatch ev={ev_sz} blk={blk_sz}")
     return {
@@ -191,6 +211,11 @@ def read_footer(data: bytes) -> dict:
         "initialCount": initial_count, "componentOffset": component_off,
         "componentCount": component_count, "componentMemberOffset": component_member_off,
         "componentMemberCount": component_member_count, "summaryOffset": summary_off,
+        "wouldPowerOffset": would_power_off, "wouldPowerCount": would_power_count,
+        "staticPushGroupOffset": static_push_group_off,
+        "staticPushGroupCount": static_push_group_count,
+        "staticPushMemberOffset": static_push_member_off,
+        "staticPushMemberCount": static_push_member_count,
     }
 
 
@@ -235,6 +260,23 @@ def read_component_members(data: bytes, footer: dict) -> list[int]:
 
 def read_summary(data: bytes, footer: dict) -> RunSummary:
     return RunSummary(_SUMMARY.unpack_from(data, footer["summaryOffset"]))
+
+
+def read_would_power(data: bytes, footer: dict) -> list["WouldPowerEdge"]:
+    off = footer["wouldPowerOffset"]
+    return [WouldPowerEdge(_WOULDPOWER.unpack_from(data, off + i * _WOULDPOWER.size))
+            for i in range(footer["wouldPowerCount"])]
+
+
+def read_static_push_preview(data: bytes, footer: dict) -> list[PushGroupRecord]:
+    off = footer["staticPushGroupOffset"]
+    return [PushGroupRecord(_PUSHGROUP.unpack_from(data, off + i * _PUSHGROUP.size))
+            for i in range(footer["staticPushGroupCount"])]
+
+
+def read_static_push_members(data: bytes, footer: dict) -> list[int]:
+    off = footer["staticPushMemberOffset"]
+    return list(struct.unpack_from(f"<{footer['staticPushMemberCount']}Q", data, off))
 
 
 def _fmt_event(ev: SimEvent) -> str:
@@ -309,6 +351,22 @@ def dump_log(path: Path) -> int:
           f"validCycle={bool(summary.validCycle)} ticks={summary.totalTicks} period={summary.period} "
           f"netShift={summary.netShift} maxPushGroupSize={summary.maxPushGroupSize} "
           f"pushLimitFailures={summary.pushLimitFailureCount} --")
+
+    would_power = read_would_power(data, footer)
+    print(f"-- {len(would_power)} static would_power edge(s) --")
+    for wp in would_power:
+        via = " (via QC)" if wp.viaQC else ""
+        print(f"  {unpack_pos(wp.sourceKey)} would power piston{unpack_pos(wp.pistonKey)}{via}")
+
+    static_previews = read_static_push_preview(data, footer)
+    static_members = read_static_push_members(data, footer)
+    print(f"-- {len(static_previews)} static push-group preview(s) (t=0, whether-or-not-it-fires) --")
+    for g in static_previews:
+        status = "OK" if g.succeeded else f"FAILED ({FAILURE_REASON_NAMES.get(g.failureReason, g.failureReason)})"
+        mem = [unpack_pos(static_members[g.memberOffset + i]) for i in range(g.memberCount)]
+        print(f"  piston{unpack_pos(g.pistonKey)} dir={DIR_NAMES.get(g.direction, g.direction)} "
+              f"attempted={g.attemptedCount} {status} members={mem}")
+
     return empty
 
 
@@ -386,14 +444,29 @@ def _self_check() -> None:
     summary_off = len(body)
     body += _SUMMARY.pack(0, 1, 0, 0, 20, 13, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 2, 0, 13, 1, 2, 0)
 
+    # Would-power edge (kA statically powers piston kB, via QC).
+    would_power_off = len(body)
+    body += _WOULDPOWER.pack(kA, kB, 1)
+
+    # Static push-group preview (SDL4): piston kB, previewed regardless of whether it ever fires -
+    # separate section AND separate member array from the dynamic push-group ones above.
+    static_member_off = len(body)
+    static_members = [kA, kB]
+    body += b"".join(struct.pack("<Q", m) for m in static_members)
+    static_group_off = len(body)
+    body += _PUSHGROUP.pack(0, kB, 0, 0, 0, 1, 0, 0, 0, 0, len(static_members), 0, 2, 0)
+
     footer = _FOOTER.pack(
-        b"SDL3", 3, 0, 0, 3, idx_off, 2, 96, 32,
+        b"SDL4", 4, 0, 0, 3, idx_off, 2, 96, 32,
         pg_rec_off, 1, 48,
         pg_off, len(push_members), 0,
         initial_off, 1, 32,
         comp_off, 1, 32,
         comp_member_off, 2,
-        64, summary_off, 0,
+        64, summary_off,
+        would_power_off, 1, 24,
+        static_group_off, 1, len(static_members),
+        static_member_off, 0,
     )
     data = body + footer
 
@@ -419,6 +492,16 @@ def _self_check() -> None:
 
     summary = read_summary(data, f)
     assert summary.terminationReason == 0 and summary.validCycle == 1 and summary.period == 13
+
+    would_power = read_would_power(data, f)
+    assert len(would_power) == 1 and would_power[0].sourceKey == kA and would_power[0].pistonKey == kB
+    assert would_power[0].viaQC == 1
+
+    static_previews = read_static_push_preview(data, f)
+    assert len(static_previews) == 1 and static_previews[0].pistonKey == kB
+    assert static_previews[0].succeeded == 1 and static_previews[0].attemptedCount == 2
+    static_members_read = read_static_push_members(data, f)
+    assert static_members_read == [kA, kB]
 
     print("self-check PASS")
 

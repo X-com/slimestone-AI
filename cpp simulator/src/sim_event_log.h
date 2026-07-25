@@ -126,6 +126,12 @@ struct BlockIndexEntry {
 
 // One record per piston firing ATTEMPT (success or fail). Members index into the flat pushMembers[]
 // array via memberOffset/memberCount. Failed attempts are recorded with full would-be membership.
+// Reused as-is (same type, separate section + separate member array) for the STATIC push-group
+// preview: one speculative PistonStructureHelper::canMove() call per piston at load time, for
+// whichever action its current extended state implies is next (extend if retracted, retract if
+// extended) - so every piston has a group-size feature available even if it never actually fires
+// during the observed run. In that static section, tick/subtick/globalSeq are not meaningful (always
+// 0) - the section itself (not a field) tells the reader "this is a t=0 prediction, not an event".
 struct PushGroupRecord {
     std::uint64_t globalSeq = 0;
     std::uint64_t pistonKey = 0;     // stable id of the acting piston
@@ -155,6 +161,19 @@ struct InitialBlockState {
     std::uint8_t  pad = 0;
     std::uint32_t rawState = 0;        // full state word (type|meta), no second lookup
     std::uint32_t reserved = 0;
+};
+
+// Static, ahead-of-time relation: sourceKey statically powers pistonKey given the t=0 board, computed
+// once at load via the simulator's own power-resolution code (not reimplemented) - independent of
+// whether that activation ever actually happens during the observed run. viaQC distinguishes a direct
+// adjacency from a quasi-connectivity path (through the block above the piston) - the model needs this
+// distinction (see sim_event_log.h's PistonNeighborNotified doc / the QC design discussion): QC powers
+// but never itself fires an update, so `would_power` must expose it or the model sees uncaused pistons.
+struct WouldPowerEdge {
+    std::uint64_t sourceKey = 0;   // stable id of the power-providing block (redstone/observer/etc.)
+    std::uint64_t pistonKey = 0;   // stable id of the piston it would power
+    std::uint8_t  viaQC = 0;       // 0 = direct adjacency, 1 = via quasi-connectivity
+    std::uint8_t  pad[7] = {0, 0, 0, 0, 0, 0, 0};
 };
 
 // Connected sticky group at t=0. Members index into the flat componentMembers[] array.
@@ -192,10 +211,14 @@ struct RunSummary {
     std::uint32_t reserved = 0;
 };
 
-// EOF footer. Readers seek from the end. Carries offset+count for every section.
+// EOF footer. Readers seek from the end. Carries offset+count for every section. Bumped SDL3->SDL4
+// (magic + formatVersion both change) because the footer's own byte size grows here - this codebase's
+// established convention (see SDL2->SDL3) is a new magic per footer-layout change, so a fixed-size
+// footer can always be read with a single EOF-relative seek instead of a reader having to dispatch on
+// formatVersion to learn how big the footer even is.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '3'};
-    std::uint32_t formatVersion = 3;
+    char          magic[4] = {'S', 'D', 'L', '4'};
+    std::uint32_t formatVersion = 4;
     std::uint64_t simulatorBuildHash = 0;
     std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;
@@ -219,6 +242,16 @@ struct SimLogFooter {
     std::uint32_t componentMemberCount = 0;
     std::uint32_t summaryRecSize = sizeof(RunSummary);
     std::uint64_t summaryOffset = 0;
+    // SDL4 additions:
+    std::uint64_t wouldPowerOffset = 0;
+    std::uint32_t wouldPowerCount = 0;
+    std::uint32_t wouldPowerRecSize = sizeof(WouldPowerEdge);
+    // Static push-group preview reuses PushGroupRecord (see its doc comment) but is a distinct
+    // section + distinct member array from the dynamic pushGroup*/pushMember* fields above.
+    std::uint64_t staticPushGroupOffset = 0;
+    std::uint32_t staticPushGroupCount = 0;
+    std::uint32_t staticPushMemberCount = 0;
+    std::uint64_t staticPushMemberOffset = 0;
     std::uint64_t reserved = 0;
 };
 #pragma pack(pop)
@@ -229,7 +262,8 @@ static_assert(sizeof(PushGroupRecord) == 48, "PushGroupRecord must be 48 bytes")
 static_assert(sizeof(InitialBlockState) == 32, "InitialBlockState must be 32 bytes");
 static_assert(sizeof(ComponentRecord) == 32, "ComponentRecord must be 32 bytes");
 static_assert(sizeof(RunSummary) == 64, "RunSummary must be 64 bytes");
-static_assert(sizeof(SimLogFooter) == 148, "SimLogFooter must be 148 bytes");
+static_assert(sizeof(WouldPowerEdge) == 24, "WouldPowerEdge must be 24 bytes");
+static_assert(sizeof(SimLogFooter) == 188, "SimLogFooter must be 188 bytes");
 static_assert(std::is_standard_layout<SimEvent>::value, "SimEvent must be standard-layout");
 
 struct QueueInfo {
@@ -271,6 +305,13 @@ public:
     }
     void setSummary(const RunSummary& summary) { summary_ = summary; hasSummary_ = true; }
 
+    // SDL4 section setters.
+    void setWouldPower(std::vector<WouldPowerEdge> edges) { wouldPower_ = std::move(edges); }
+    void setStaticPushPreview(std::vector<PushGroupRecord> records, std::vector<std::uint64_t> members) {
+        staticPushGroups_ = std::move(records);
+        staticPushMembers_ = std::move(members);
+    }
+
     // Self-check: round-trips synthetic events + one of every new section through a temp file + inline
     // reader, asserts each reconstructs correctly. Returns true on PASS.
     static bool selfTest();
@@ -286,6 +327,9 @@ private:
     std::vector<InitialBlockState> initial_;
     std::vector<ComponentRecord> components_;
     std::vector<std::uint64_t> componentMembers_;
+    std::vector<WouldPowerEdge> wouldPower_;
+    std::vector<PushGroupRecord> staticPushGroups_;
+    std::vector<std::uint64_t> staticPushMembers_;
     RunSummary summary_;
     bool hasSummary_ = false;
     std::unordered_map<std::uint64_t, std::size_t> indexOf_;      // originalKey -> blockIndex_ slot

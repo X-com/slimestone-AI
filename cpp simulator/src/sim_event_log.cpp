@@ -24,6 +24,9 @@ void SimEventLog::open(const std::string& path) {
     initial_.clear();
     components_.clear();
     componentMembers_.clear();
+    wouldPower_.clear();
+    staticPushGroups_.clear();
+    staticPushMembers_.clear();
     summary_ = RunSummary{};
     hasSummary_ = false;
     indexOf_.clear();
@@ -176,6 +179,14 @@ void SimEventLog::close() {
     footer.componentMemberCount = static_cast<std::uint32_t>(componentMembers_.size());
     footer.summaryOffset = static_cast<std::uint64_t>(out_.tellp());
     out_.write(reinterpret_cast<const char*>(&footerSummary), sizeof(RunSummary));
+    footer.wouldPowerOffset = writeVec(wouldPower_.data(), wouldPower_.size(), sizeof(WouldPowerEdge));
+    footer.wouldPowerCount = static_cast<std::uint32_t>(wouldPower_.size());
+    footer.staticPushMemberOffset =
+        writeVec(staticPushMembers_.data(), staticPushMembers_.size(), sizeof(std::uint64_t));
+    footer.staticPushMemberCount = static_cast<std::uint32_t>(staticPushMembers_.size());
+    footer.staticPushGroupOffset =
+        writeVec(staticPushGroups_.data(), staticPushGroups_.size(), sizeof(PushGroupRecord));
+    footer.staticPushGroupCount = static_cast<std::uint32_t>(staticPushGroups_.size());
 
     out_.write(reinterpret_cast<const char*>(&footer), sizeof(footer));
     out_.close();
@@ -187,6 +198,9 @@ void SimEventLog::close() {
     initial_.clear();
     components_.clear();
     componentMembers_.clear();
+    wouldPower_.clear();
+    staticPushGroups_.clear();
+    staticPushMembers_.clear();
     summary_ = RunSummary{};
     hasSummary_ = false;
     indexOf_.clear();
@@ -251,10 +265,21 @@ bool SimEventLog::selfTest() {
         rs.netShift[0] = 1; rs.blockCount = 2;
         log.setSummary(rs);
 
+        // One would-power edge (kA statically powers kB, via QC) and one static push-group preview
+        // (a piston that never actually fires during a run still gets a group-size feature).
+        WouldPowerEdge wp;
+        wp.sourceKey = kA; wp.pistonKey = kB; wp.viaQC = 1;
+        log.setWouldPower(std::vector<WouldPowerEdge>{wp});
+
+        PushGroupRecord staticPreview;
+        staticPreview.pistonKey = kB; staticPreview.succeeded = 1; staticPreview.attemptedCount = 2;
+        staticPreview.memberCount = 2; staticPreview.memberOffset = 0;
+        log.setStaticPushPreview(std::vector<PushGroupRecord>{staticPreview}, std::vector<std::uint64_t>{kA, kB});
+
         log.close();
     }
 
-    // Inline reader: footer from EOF-48, block index, then per-block contiguous runs.
+    // Inline reader: footer from EOF, block index, then per-block contiguous runs.
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         std::cerr << "selftest: could not reopen " << path << '\n';
@@ -269,7 +294,7 @@ bool SimEventLog::selfTest() {
     SimLogFooter footer;
     in.seekg(size - static_cast<std::streamoff>(sizeof(SimLogFooter)), std::ios::beg);
     in.read(reinterpret_cast<char*>(&footer), sizeof(footer));
-    if (std::memcmp(footer.magic, "SDL3", 4) != 0 || footer.eventRecSize != sizeof(SimEvent)) {
+    if (std::memcmp(footer.magic, "SDL4", 4) != 0 || footer.eventRecSize != sizeof(SimEvent)) {
         std::cerr << "selftest: bad footer\n";
         return false;
     }
@@ -349,8 +374,35 @@ bool SimEventLog::selfTest() {
         && rs.totalEvents == 4 && rs.distinctBlocksWithEvents == 2
         && rs.maxPushGroupSize == 13 && rs.pushLimitFailureCount == 1;
 
+    // Would-power edge (static, SDL4).
+    std::vector<WouldPowerEdge> wouldPower(footer.wouldPowerCount);
+    if (footer.wouldPowerCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.wouldPowerOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(wouldPower.data()),
+                static_cast<std::streamsize>(footer.wouldPowerCount * sizeof(WouldPowerEdge)));
+    }
+    ok = ok && wouldPower.size() == 1 && wouldPower[0].sourceKey == kA && wouldPower[0].pistonKey == kB
+        && wouldPower[0].viaQC == 1;
+
+    // Static push-group preview (SDL4) - a separate section + member array from the dynamic ones.
+    std::vector<PushGroupRecord> staticGroups(footer.staticPushGroupCount);
+    if (footer.staticPushGroupCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.staticPushGroupOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(staticGroups.data()),
+                static_cast<std::streamsize>(footer.staticPushGroupCount * sizeof(PushGroupRecord)));
+    }
+    std::vector<std::uint64_t> staticMembers(footer.staticPushMemberCount);
+    if (footer.staticPushMemberCount > 0) {
+        in.seekg(static_cast<std::streamoff>(footer.staticPushMemberOffset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(staticMembers.data()),
+                static_cast<std::streamsize>(footer.staticPushMemberCount * sizeof(std::uint64_t)));
+    }
+    ok = ok && staticGroups.size() == 1 && staticGroups[0].pistonKey == kB
+        && staticGroups[0].succeeded == 1 && staticGroups[0].attemptedCount == 2
+        && staticMembers.size() == 2 && staticMembers[0] == kA && staticMembers[1] == kB;
+
     if (!ok) {
-        std::cerr << "selftest: SDL3 sections did not round-trip\n";
+        std::cerr << "selftest: SDL4 sections did not round-trip\n";
     }
 
     std::error_code ec;
