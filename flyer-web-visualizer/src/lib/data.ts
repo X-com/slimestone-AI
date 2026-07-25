@@ -1,6 +1,8 @@
 // Load + type the machine archive (genetic-ml/data/outputs/ga_archive.jsonl,
 // served from /public via symlink).
 
+import { parseSimLog, type SimLog } from './simlog'
+
 export interface Vec3 {
   x: number
   y: number
@@ -42,6 +44,7 @@ export interface Machine {
   candidate: Candidate
   result: Result | null // null for uploaded bare candidates (no simulation metadata)
   found_at: string
+  simLog?: SimLog | null // per-block event history (Simulated tab only) - see simlog.ts
 }
 
 export async function loadMachines(
@@ -94,11 +97,16 @@ export async function loadComplexMachines(
 const HEADER_BYTES = 20
 const BLOCK_BYTES = 16
 
-export function parseCompactData(name: string, buf: ArrayBuffer): Machine[] {
+interface RawCandidate {
+  id: number
+  trigger: Vec3
+  blocks: Block[]
+}
+
+function decodeCompactRecords(name: string, buf: ArrayBuffer): RawCandidate[] {
   const view = new DataView(buf)
-  const machines: Machine[] = []
+  const records: RawCandidate[] = []
   let off = 0
-  let index = 0
   while (off < buf.byteLength) {
     if (off + HEADER_BYTES > buf.byteLength)
       throw new Error(`${name}: truncated record header at byte ${off}`)
@@ -121,19 +129,61 @@ export function parseCompactData(name: string, buf: ArrayBuffer): Machine[] {
       })
       off += BLOCK_BYTES
     }
-
-    machines.push({
-      hash: `uploaded:${name}#${index}`,
-      label: `#${id}`,
-      source: name,
-      generation: 0,
-      origin: 'uploaded',
-      block_count: blockCount,
-      candidate: { id, trigger: { x: tx, y: ty, z: tz }, blocks },
-      result: null,
-      found_at: '',
-    })
-    index++
+    records.push({ id, trigger: { x: tx, y: ty, z: tz }, blocks })
   }
-  return machines
+  return records
+}
+
+export function parseCompactData(name: string, buf: ArrayBuffer): Machine[] {
+  return decodeCompactRecords(name, buf).map((c, index) => ({
+    hash: `uploaded:${name}#${index}`,
+    label: `#${c.id}`,
+    source: name,
+    generation: 0,
+    origin: 'uploaded',
+    block_count: c.blocks.length,
+    candidate: c,
+    result: null,
+    found_at: '',
+  }))
+}
+
+// Simulated tab: streamed over a WebSocket by util tools/run_simulation_batch.py (every fixture
+// in "flying machines/json", not just ones that validly cycle - filtering is a viewing choice,
+// not a publishing one). Wire format, exactly 3 WS messages per connection:
+//   1. text (JSON) {"names": {"<id>": "<fixture stem>", ...}} - decoded directly by the caller
+//   2. binary, tag 0x01 + concatenated compact-format candidate records (parseSimulatedCandidates)
+//   3. binary, tag 0x02 + repeated {int32 id, uint32 byteLength, <byteLength bytes>} - every
+//      fixture's simulation_data batched into one message (see run_simulation_batch.py for why:
+//      many separate small WS messages were observed to arrive corrupted in a real browser).
+//      parseSimulatedSimLogs splits these back apart.
+// names: id -> fixture filename stem, from the JSON text frame sent before this one (the
+// compact binary candidate format has no name field - see run_simulation_batch.py).
+export function parseSimulatedCandidates(buf: ArrayBuffer, names: Map<number, string>): Machine[] {
+  return decodeCompactRecords('simulated', buf).map((c) => ({
+    hash: `simulated:${c.id}`,
+    label: names.get(c.id) ?? `#${c.id}`,
+    source: names.get(c.id),
+    generation: 0,
+    origin: 'simulated',
+    block_count: c.blocks.length,
+    candidate: c,
+    result: null,
+    found_at: '',
+    simLog: null,
+  }))
+}
+
+export function parseSimulatedSimLogs(buf: ArrayBuffer): { id: number; simLog: SimLog }[] {
+  const view = new DataView(buf)
+  const out: { id: number; simLog: SimLog }[] = []
+  let off = 0
+  while (off < buf.byteLength) {
+    const id = view.getInt32(off, true)
+    const byteLength = view.getUint32(off + 4, true)
+    off += 8
+    out.push({ id, simLog: parseSimLog(buf.slice(off, off + byteLength)) })
+    off += byteLength
+  }
+  return out
 }

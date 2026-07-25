@@ -1,8 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { loadMachines, loadComplexMachines, parseCompactData, type Machine } from './lib/data'
-  import { createScene, type SceneHandle } from './lib/scene'
+  import {
+    loadMachines,
+    loadComplexMachines,
+    parseCompactData,
+    parseSimulatedCandidates,
+    parseSimulatedSimLogs,
+    type Machine,
+  } from './lib/data'
+  import { createScene, type SceneHandle, type HoverInfo } from './lib/scene'
   import MachineDetailPanel from './lib/MachineDetailPanel.svelte'
+  import BlockHoverTooltip from './lib/BlockHoverTooltip.svelte'
 
   const PAGE = 25
   const UPLOAD_CAP = 25 // cap rendered uploads: one DOM label per machine gets heavy past this
@@ -14,14 +22,20 @@
   let uploaded = $state<Machine[]>([])
   let complex = $state<Machine[]>([]) // large hand-authored examples (public/machines/)
   let complexIdx = $state(0)
+  let simulated = $state<Machine[]>([]) // streamed by util tools/run_simulation_batch.py
   let visible = $state<Machine[]>([])
-  let mode = $state<'first' | 'last' | 'random' | 'uploaded' | 'complex'>('first')
+  let mode = $state<'first' | 'last' | 'random' | 'uploaded' | 'complex' | 'simulated'>('first')
   let selected = $state<Machine | null>(null)
   let error = $state<string | null>(null)
   let loading = $state(true)
 
-  // Top-level tab: "Complex Examples" vs everything archive/upload ("Examples").
-  const tab = $derived(mode === 'complex' ? 'complex' : 'examples')
+  // Per-block hover inspector (Simulated tab): whichever block is under the pointer right now.
+  let hoverInfo = $state<HoverInfo | null>(null)
+  let hoverX = $state(0)
+  let hoverY = $state(0)
+
+  // Top-level tab: "Complex Examples" / "Simulated" vs everything archive/upload ("Examples").
+  const tab = $derived(mode === 'complex' ? 'complex' : mode === 'simulated' ? 'simulated' : 'examples')
 
   function shuffle100(list: Machine[]): Machine[] {
     const a = [...list]
@@ -55,8 +69,74 @@
     selected = complex[complexIdx] // "select one" — open its detail panel by default
   }
 
+  // Simulated tab: everything util tools/run_simulation_batch.py streams over the WebSocket
+  // (every fixture, not just ones that validly cycle), all at once - unlike Complex Examples
+  // this isn't one-at-a-time cycling. Auto-connects the first time the tab is opened.
+  let simulatedUrl = $state('ws://localhost:8765')
+  let simulatedStatus = $state<'idle' | 'connecting' | 'connected' | 'closed' | 'error'>('idle')
+  let simulatedWs: WebSocket | null = null
+  let simulatedNames = new Map<number, string>() // id -> fixture stem, from the names text frame
+
+  function connectSimulated() {
+    if (simulatedWs) return
+    simulatedStatus = 'connecting'
+    try {
+      simulatedWs = new WebSocket(simulatedUrl)
+    } catch (e) {
+      simulatedStatus = 'error'
+      simulatedWs = null
+      return
+    }
+    simulatedWs.binaryType = 'arraybuffer'
+    simulatedWs.onopen = () => {
+      simulatedStatus = 'connected'
+      simulated = []
+      simulatedNames = new Map()
+    }
+    simulatedWs.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        const parsed = JSON.parse(e.data) as { names: Record<string, string> }
+        simulatedNames = new Map(Object.entries(parsed.names).map(([id, name]) => [Number(id), name]))
+        return
+      }
+      const buf = e.data as ArrayBuffer
+      const tag = new Uint8Array(buf, 0, 1)[0]
+      const rest = buf.slice(1)
+      if (tag === 0x01) {
+        simulated = parseSimulatedCandidates(rest, simulatedNames)
+        if (mode === 'simulated') visible = simulated
+      } else if (tag === 0x02) {
+        // One chunk of simlogs (see run_simulation_batch.py) - a connection may send several.
+        for (const { id, simLog } of parseSimulatedSimLogs(rest)) {
+          const m = simulated.find((m) => m.candidate.id === id)
+          if (m) m.simLog = simLog // in-place: hover reads machine.simLog live, no rebuild needed
+        }
+      }
+    }
+    simulatedWs.onerror = () => (simulatedStatus = 'error')
+    simulatedWs.onclose = () => {
+      simulatedStatus = 'closed'
+      simulatedWs = null
+    }
+  }
+
+  function disconnectSimulated() {
+    simulatedWs?.close()
+    simulatedWs = null
+    simulatedStatus = 'idle'
+  }
+
+  function simulatedTab() {
+    mode = 'simulated'
+    selected = null
+    visible = simulated
+    if (simulatedStatus === 'idle' || simulatedStatus === 'closed' || simulatedStatus === 'error') {
+      connectSimulated()
+    }
+  }
+
   function examplesTab() {
-    if (mode === 'complex') pick('first')
+    if (mode === 'complex' || mode === 'simulated') pick('first')
   }
 
   async function onUpload(e: Event) {
@@ -133,6 +213,11 @@
       loading = false
       return
     }
+    handle.onHover((info, clientX, clientY) => {
+      hoverInfo = info
+      hoverX = clientX
+      hoverY = clientY
+    })
     window.addEventListener('keydown', onKey)
     Promise.all([
       loadMachines().then((m) => (all = m)),
@@ -148,6 +233,8 @@
       .finally(() => (loading = false))
     return () => {
       window.removeEventListener('keydown', onKey)
+      simulatedWs?.close()
+      simulatedWs = null
       handle?.dispose()
     }
   })
@@ -193,6 +280,16 @@
       onclick={examplesTab}
     >
       Examples
+    </button>
+    <button
+      class="rounded px-2.5 py-1 text-xs font-medium transition
+        {tab === 'simulated'
+        ? 'bg-emerald-400 text-slate-900'
+        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'}"
+      title="Every fixture streamed by util tools/run_simulation_batch.py - hover a block for its simulation_data event log"
+      onclick={simulatedTab}
+    >
+      Simulated{#if simulated.length}&nbsp;({simulated.length}){/if}
     </button>
   </div>
 
@@ -248,6 +345,16 @@
         UPLOAD_CAP
           ? ` (cap ${UPLOAD_CAP})`
           : ''}
+      {:else if mode === 'simulated'}
+        {simulatedStatus}
+        {#if simulatedStatus === 'connected'}
+          · {simulated.length} machine{simulated.length === 1 ? '' : 's'} · hover a block for its event log
+        {:else if simulatedStatus === 'error' || simulatedStatus === 'closed'}
+          · is <code class="text-cyan-300">py "util tools/run_simulation_batch.py"</code> running?
+          <button class="ml-1 rounded bg-slate-800 px-1.5 py-0.5 hover:bg-slate-700" onclick={connectSimulated}
+            >Retry</button
+          >
+        {/if}
       {:else}
         showing {visible.length} of {all.length}
       {/if}
@@ -303,3 +410,16 @@
 
 <!-- Detail panel -->
 <MachineDetailPanel machine={selected} onClose={() => (selected = null)} />
+
+<!-- Per-block hover inspector (whichever block is under the pointer, any visible machine) -->
+{#if hoverInfo}
+  <BlockHoverTooltip
+    x={hoverInfo.x}
+    y={hoverInfo.y}
+    z={hoverInfo.z}
+    state={hoverInfo.state}
+    events={hoverInfo.events}
+    clientX={hoverX}
+    clientY={hoverY}
+  />
+{/if}

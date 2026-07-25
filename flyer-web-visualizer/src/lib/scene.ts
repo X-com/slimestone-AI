@@ -11,8 +11,19 @@ import { decodeState } from './blocks'
 import { BLOCK_TYPES } from './blocks'
 import { loadBlockAssets, frontAxis, type BlockAssets } from './textures'
 import type { Machine } from './data'
+import { packPos, type SimEvent } from './simlog'
 
 const GAP = 3 // empty cells between machines
+
+// Info handed to the hover callback for whichever block is currently under the pointer.
+export interface HoverInfo {
+  machine: Machine
+  x: number
+  y: number
+  z: number
+  state: number
+  events: SimEvent[] | null // null = machine has no simLog loaded (nothing to show)
+}
 
 export interface SceneHandle {
   // keepCamera: after the first build, leave the camera where it is instead of re-framing
@@ -26,6 +37,9 @@ export interface SceneHandle {
   focusSelected(hash: string): void // recenter + zoom-to-fit a machine (arrow navigation)
   setElevation(elevationDeg: number): void // snap up/down, keeping current azimuth
   resetView(): void // re-frame the whole current set (undo any orbit/zoom)
+  // Registers the per-block hover inspector callback (screen coords for tooltip placement).
+  // Called at most once; fires with null when the pointer leaves any block.
+  onHover(cb: (info: HoverInfo | null, clientX: number, clientY: number) => void): void
   dispose(): void
 }
 
@@ -103,6 +117,7 @@ export function createScene(container: HTMLElement): SceneHandle {
   let blockMeshes: THREE.InstancedMesh[] = []
   let placed: Placed[] = []
   let onSelectCb: (m: Machine | null) => void = () => {}
+  let onHoverCb: (info: HoverInfo | null, clientX: number, clientY: number) => void = () => {}
   let selectedHash: string | null = null
   let hasFramed = false // whether the camera has been auto-framed at least once
   let lastFrame: [cols: number, n: number, cell: number] | null = null // for resetView()
@@ -163,8 +178,14 @@ export function createScene(container: HTMLElement): SceneHandle {
     const cell = maxFoot + GAP
     const cols = Math.max(1, Math.ceil(Math.sqrt(machines.length)))
 
-    // One instanced draw per block id; collect placements first, then build meshes.
-    const byId = new Map<number, { machine: Machine; matrix: THREE.Matrix4 }[]>()
+    // One instanced draw per block id; collect placements first, then build meshes. Each entry
+    // also carries the block's original candidate-space position/state (for the hover inspector
+    // to look up its simLog events by packPos(x,y,z) - independent of where it's drawn in the
+    // shared grid).
+    const byId = new Map<
+      number,
+      { machine: Machine; matrix: THREE.Matrix4; x: number; y: number; z: number; state: number }[]
+    >()
     const triggerMats: THREE.Matrix4[] = []
 
     machines.forEach((m, idx) => {
@@ -210,7 +231,7 @@ export function createScene(container: HTMLElement): SceneHandle {
         dummy.updateMatrix()
 
         const list = byId.get(d.blockId) ?? []
-        list.push({ machine: m, matrix: dummy.matrix.clone() })
+        list.push({ machine: m, matrix: dummy.matrix.clone(), x: blk.x, y: blk.y, z: blk.z, state: blk.state })
         byId.set(d.blockId, list)
 
         mBox.expandByPoint(_bmin.set(wx - 0.5, wy - 0.5, wz - 0.5))
@@ -239,6 +260,7 @@ export function createScene(container: HTMLElement): SceneHandle {
       const mat = assets ? assets.material(id) : coloredMat(id)
       const mesh = new THREE.InstancedMesh(geo, mat, list.length)
       mesh.userData.machines = list.map((e) => e.machine)
+      mesh.userData.blocks = list.map((e) => ({ x: e.x, y: e.y, z: e.z, state: e.state }))
       list.forEach((e, i) => mesh.setMatrixAt(i, e.matrix))
       mesh.instanceMatrix.needsUpdate = true
       // A packed per-block-type mesh spans the whole field, so per-object frustum culling just
@@ -388,6 +410,41 @@ export function createScene(container: HTMLElement): SceneHandle {
     }
   })
 
+  // Hover inspector: throttled raycast (same ~15Hz cadence as updateOcclusion below) so a fast
+  // pointermove stream doesn't force a full-scene raycast every frame. No animation - this only
+  // looks up and reports the block currently under the cursor.
+  let lastHoverAt = 0
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    const now = performance.now()
+    if (now - lastHoverAt < 66) return
+    lastHoverAt = now
+    if (!blockMeshes.length) {
+      onHoverCb(null, e.clientX, e.clientY)
+      return
+    }
+    const rect = renderer.domElement.getBoundingClientRect()
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+    raycaster.setFromCamera(pointer, camera)
+    raycaster.far = Infinity
+    const hit = raycaster.intersectObjects(blockMeshes, false)[0]
+    if (!hit || hit.instanceId == null) {
+      onHoverCb(null, e.clientX, e.clientY)
+      return
+    }
+    const machines = hit.object.userData.machines as Machine[]
+    const blocks = hit.object.userData.blocks as { x: number; y: number; z: number; state: number }[]
+    const machine = machines[hit.instanceId]
+    const blk = blocks[hit.instanceId]
+    if (!machine || !blk) {
+      onHoverCb(null, e.clientX, e.clientY)
+      return
+    }
+    const events = machine.simLog?.eventsByKey.get(packPos(blk.x, blk.y, blk.z)) ?? null
+    onHoverCb({ machine, x: blk.x, y: blk.y, z: blk.z, state: blk.state, events }, e.clientX, e.clientY)
+  })
+  renderer.domElement.addEventListener('pointerleave', (e) => onHoverCb(null, e.clientX, e.clientY))
+
   // Hide a machine's floating label when blocks sit between it and the camera. CSS2D labels
   // have no depth test, so we raycast from the camera to each label anchor and occlude.
   // ponytail: O(labels * instances) per moving frame; throttled to ~15Hz, fine for <=400 labels.
@@ -437,6 +494,9 @@ export function createScene(container: HTMLElement): SceneHandle {
     focusSelected,
     setElevation,
     resetView,
+    onHover(cb) {
+      onHoverCb = cb
+    },
     dispose() {
       cancelAnimationFrame(raf)
       ro.disconnect()
