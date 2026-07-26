@@ -83,7 +83,7 @@ BLOCK_NAMES = {
     27: "golden_rail", 28: "detector_rail", 66: "rail", 157: "activator_rail",
     96: "trapdoor", 167: "iron_trapdoor", 107: "fence_gate", 152: "redstone_block",
     165: "slime", 218: "observer", 123: "redstone_lamp", 124: "lit_redstone_lamp",
-    49: "obsidian", 1: "stone", 20: "glass",
+    49: "obsidian", 1: "stone", 20: "glass", 235: "glazed_terracotta",
 }
 FAILURE_REASON_NAMES = {
     0: "None", 1: "PushLimitExceeded", 2: "ImmovableBlockInPath", 3: "NoSpaceToExtend",
@@ -94,7 +94,7 @@ TERMINATION_NAMES = {
     4: "OutOfBounds", 5: "InternalError",
 }
 MOVABILITY_NAMES = {0: "movable", 1: "immovable", 2: "pops"}
-STICKINESS_NAMES = {0: "none", 1: "sticks-all", 2: "sticks-all-except-slime"}
+STICKINESS_NAMES = {0: "none", 1: "sticks-all", 2: "sticks-all-except-slime", 3: "never-sticks"}
 
 SEF_EXTEND = 1 << 0
 SEF_SUCCESS = 1 << 1
