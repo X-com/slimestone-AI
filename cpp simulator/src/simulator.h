@@ -173,7 +173,7 @@ private:
     // position for anything not tracked.
     std::uint64_t stableKey(BlockPos pos) const;
     void logPistonQueued(BlockPos pistonPos, int direction, bool extend);
-    void logObserverActivations(BlockPos observerPos, std::uint32_t state);
+    void logObserverActivations(BlockPos observerPos, std::uint32_t state, bool turningOn);
     void logRedstonePistonScan(BlockPos redstonePos, bool activating);
     bool shouldPistonBeExtended(BlockPos pos, std::uint32_t state) const;
     // simulation_data (SDL4): static "would_power" relation. Mirrors redstonePower()'s exact

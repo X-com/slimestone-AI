@@ -36,10 +36,7 @@ const PISTON_HEAD_ID = 34 // BLOCK_PISTON_HEAD (blocks.py) - already has a textu
 const TRIGGER_COLOR = 0xb14aff // matches scene.ts's trigger glow exactly
 const BLOCKED_COLOR = 0xff3b3b
 const OBSERVER_COLOR = 0xff9d9d // lighter red, distinguishable from a blocked push
-// ponytail: stopgap "on" duration for the observer-fire highlight - the simlog has no real
-// "observer turned off" event to read (see isActiveAtTick); bump/replace once the simulator logs
-// one and this can read a real duration instead of a fixed guess.
-const OBSERVER_ON_TICKS = 2
+const DROPPED_COLOR = 0xff9800 // orange - a scheduledTickDropped event, distinct from both reds
 
 export interface AnimatedSceneHandle {
   loadMachine(machine: Machine): void
@@ -193,6 +190,7 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   const triggerMat = overlayMat(TRIGGER_COLOR, 0.5)
   const blockedMat = overlayMat(BLOCKED_COLOR, 0.6)
   const observerMat = overlayMat(OBSERVER_COLOR, 0.6)
+  const droppedMat = overlayMat(DROPPED_COLOR, 0.6)
 
   let meshes: THREE.InstancedMesh[] = []
   let animated: AnimatedBlock[] = []
@@ -201,10 +199,15 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   let triggerOverlay: EffectOverlay | null = null
   let blockedOverlays: EffectOverlay[] = []
   let observerOverlays: EffectOverlay[] = []
-  // Tick lists (not single events) a piston/observer is "on" for - see isActiveAtTick: an
-  // observer's real pulse lasts the whole tick it fires in, not just its own log entry's instant.
+  let droppedOverlays: EffectOverlay[] = []
+  // Tick lists (not single events) a piston is "blocked" / a scheduledTickDropped fired at - see
+  // isActiveAtTick: both are one-shot instants, held visible for exactly the tick they land in.
   let blockedTicksByIndex = new Map<number, number[]>()
-  let observerTicksByIndex = new Map<number, number[]>()
+  let droppedTicksByIndex = new Map<number, number[]>()
+  // An observer's real on/off interval, paired from its own alternating observerFired/observerOff
+  // stream - see isObserverActiveAtTick. Replaces the old fixed-duration OBSERVER_ON_TICKS guess
+  // now that the simulator actually logs the off transition.
+  let observerIntervalsByIndex = new Map<number, { on: number; off: number }[]>()
   let events: MachineEvent[] = []
   let eventIndex = -1 // -1 = the real t=0 initial state, before any logged event
   let mode: 'auto' | 'manual' = 'auto'
@@ -227,8 +230,10 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     triggerOverlay = null
     blockedOverlays = []
     observerOverlays = []
+    droppedOverlays = []
     blockedTicksByIndex = new Map()
-    observerTicksByIndex = new Map()
+    droppedTicksByIndex = new Map()
+    observerIntervalsByIndex = new Map()
     events = []
     eventIndex = -1
     mode = 'auto'
@@ -269,14 +274,20 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     return mode === 'manual' ? ab.renderPos : positionAt(ab.keyframes, currentTick())
   }
 
-  // ponytail: the simlog only logs an observer's instantaneous "fired" event - there's no separate
-  // "turned off" event for it to actually read (a real fix belongs in the simulator's event log,
-  // tracked separately). Stopgap until then: hold it "on" for a fixed OBSERVER_ON_TICKS ticks after
-  // firing instead of guessing a real duration. Blocked pushes stay a true 1-tick instant - that
-  // one IS a complete, real event (a single failed attempt), not a truncated state.
+  // A blocked push / scheduledTickDropped is a single, complete, real event (one failed attempt,
+  // one dropped reschedule) - held visible for exactly the tick it landed in, not a truncated
+  // state.
   function isActiveAtTick(ticksByIndex: Map<number, number[]>, blockIndex: number, t: number, durationTicks: number): boolean {
     const ticks = ticksByIndex.get(blockIndex)
     return ticks !== undefined && ticks.some((tick) => t >= tick && t < tick + durationTicks)
+  }
+
+  // An observer's real on/off interval, now that the simlog actually logs both transitions (see
+  // stream_to_visualizer.py's observerFired/observerOff split) - lit exactly between its own fire
+  // and the matching off, half-open on the low end / open on the high end.
+  function isObserverActiveAtTick(blockIndex: number, t: number): boolean {
+    const intervals = observerIntervalsByIndex.get(blockIndex)
+    return intervals !== undefined && intervals.some((iv) => t >= iv.on && t < iv.off)
   }
 
   function setOverlayVisible(ov: EffectOverlay, pos: THREE.Vector3, visible: boolean) {
@@ -301,7 +312,11 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     }
     for (const ov of observerOverlays) {
       const pos = livePositionNow(ov.blockIndex, ov.staticPos)
-      setOverlayVisible(ov, pos, isActiveAtTick(observerTicksByIndex, ov.blockIndex, t, OBSERVER_ON_TICKS))
+      setOverlayVisible(ov, pos, isObserverActiveAtTick(ov.blockIndex, t))
+    }
+    for (const ov of droppedOverlays) {
+      const pos = livePositionNow(ov.blockIndex, ov.staticPos)
+      setOverlayVisible(ov, pos, isActiveAtTick(droppedTicksByIndex, ov.blockIndex, t, 1))
     }
   }
 
@@ -403,10 +418,9 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     // Trigger glow (purple, matches scene.ts's multi-machine view) - only while parked at the real
     // t=0 state (tick 0, before any event has happened - see updateEffectOverlays), since the
     // trigger itself is a one-shot "this is where it all starts" marker, not a thing that's ever
-    // "on" once the machine is actually running. Blocked-push (red) / observer-fire (light-red)
-    // overlays: one instance per piston/observer in the machine (simpler than filtering to only
-    // those that ever fire), lit for the whole tick that block has a matching event in - see
-    // isActiveAtTick.
+    // "on" once the machine is actually running. Blocked-push (red) / observer (light-red) / a
+    // dropped reschedule (orange) overlays: lit for the tick(s)/interval that block has a matching
+    // event in - see isActiveAtTick / isObserverActiveAtTick.
     triggerOverlay = buildOverlay(triggerMat, [
       { blockIndex: -1, pos: toWorld(machine.candidate.trigger.x, machine.candidate.trigger.y, machine.candidate.trigger.z) },
     ])[0] ?? null
@@ -421,20 +435,52 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     observerOverlays = buildOverlay(observerMat, observerEntries)
 
     events = machine.events ?? []
+    terminationTick = machine.terminationTick ?? 0
+
+    // scheduledTickDropped's subject isn't necessarily a piston/observer - it's whatever occupies
+    // the position at drop time - so its overlay entries can't be pre-enumerated by block type;
+    // only build one for a blockIndex that actually appears in such an event.
+    const droppedIndices = new Set(events.filter((e) => e.kind === 'scheduledTickDropped').map((e) => e.blockIndex))
+    const droppedEntries = [...droppedIndices].flatMap((idx) => {
+      const blk = blocks[idx]
+      return blk ? [{ blockIndex: idx, pos: toWorld(blk.x, blk.y, blk.z) }] : []
+    })
+    droppedOverlays = buildOverlay(droppedMat, droppedEntries)
+
+    // Observer on/off intervals: pair each blockIndex's own alternating observerFired/observerOff
+    // ticks by array position (events is already sorted by (tick, order), and a single observer's
+    // own fire/off stream strictly alternates, so onTicks[i]/offTicks[i] is a safe pairing). A fire
+    // with no matching off yet (log ends mid-pulse) stays lit through the rest of playback instead
+    // of never lighting or throwing.
+    const onTicksByIndex = new Map<number, number[]>()
+    const offTicksByIndex = new Map<number, number[]>()
     for (const e of events) {
       if (e.kind === 'pistonBlocked') {
         const arr = blockedTicksByIndex.get(e.blockIndex) ?? []
         arr.push(e.tick)
         blockedTicksByIndex.set(e.blockIndex, arr)
-      } else if (e.kind === 'observerFired') {
-        const arr = observerTicksByIndex.get(e.blockIndex) ?? []
+      } else if (e.kind === 'scheduledTickDropped') {
+        const arr = droppedTicksByIndex.get(e.blockIndex) ?? []
         arr.push(e.tick)
-        observerTicksByIndex.set(e.blockIndex, arr)
+        droppedTicksByIndex.set(e.blockIndex, arr)
+      } else if (e.kind === 'observerFired') {
+        const arr = onTicksByIndex.get(e.blockIndex) ?? []
+        arr.push(e.tick)
+        onTicksByIndex.set(e.blockIndex, arr)
+      } else if (e.kind === 'observerOff') {
+        const arr = offTicksByIndex.get(e.blockIndex) ?? []
+        arr.push(e.tick)
+        offTicksByIndex.set(e.blockIndex, arr)
       }
     }
+    for (const [blockIndex, onTicks] of onTicksByIndex) {
+      const offTicks = offTicksByIndex.get(blockIndex) ?? []
+      const intervals = onTicks.map((on, i) => ({ on, off: offTicks[i] ?? terminationTick + 1 }))
+      observerIntervalsByIndex.set(blockIndex, intervals)
+    }
+
     eventIndex = -1
     mode = 'auto'
-    terminationTick = machine.terminationTick ?? 0
 
     const footprint = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs), 4)
     camera.position.set(footprint * 0.9, footprint * 1.1 + 4, footprint * 1.3)
@@ -668,6 +714,7 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       triggerMat.dispose()
       blockedMat.dispose()
       observerMat.dispose()
+      droppedMat.dispose()
       assets?.dispose()
       renderer.dispose()
       renderer.domElement.remove()

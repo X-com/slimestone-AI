@@ -65,13 +65,18 @@ export interface BlockExtension {
 // One real logged event, in true recorded (tick, order) order - the itemized log the /generator
 // page's tick/subtick stepper walks through to verify event ordering. `blockPushed`/`pistonExtend`/
 // `pistonRetract` are redundant with moves/extensions (same keyframes, just flattened into one
-// timeline); `pistonBlocked`/`observerFired` are the two effects moves/extensions can't show at all.
+// timeline); `pistonBlocked`/`observerFired`/`observerOff` are effects moves/extensions can't show
+// at all. `scheduledTickDropped` is a diagnostic-only event (see sim_event_log.h's
+// ScheduledTickDropped doc) - the simulator's scheduling collision it marks is intentional,
+// unchanged behavior, this just makes an otherwise-silent drop visible in the trace.
 export type MachineEventKind =
   | 'blockPushed'
   | 'pistonExtend'
   | 'pistonRetract'
   | 'pistonBlocked'
   | 'observerFired'
+  | 'observerOff'
+  | 'scheduledTickDropped'
 export interface MachineEvent {
   tick: number
   order: number

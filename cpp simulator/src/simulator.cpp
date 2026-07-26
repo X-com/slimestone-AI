@@ -329,6 +329,7 @@ void Simulator::observerUpdateTick(BlockPos pos, std::uint32_t state) {
     if (trace_ != nullptr) {
         trace_->logState(world_, "o.tick", &pos, state);
     }
+    bool turningOn = !metaBit(state, 3); // capture BEFORE the mutation below
     if (metaBit(state, 3)) {
         setBlockState(pos, setMetaBit(state, 3, false), 2);
     } else {
@@ -348,12 +349,12 @@ void Simulator::observerUpdateTick(BlockPos pos, std::uint32_t state) {
         ev.blockKey = key;
         ev.actorKey = key;
         ev.kind = ObserverFired;
-        ev.flags = observerCauseFlags(static_cast<std::uint8_t>(cause));
+        ev.flags = observerCauseFlags(static_cast<std::uint8_t>(cause)) | (turningOn ? SEF_OBSERVER_ON : 0);
         std::uint32_t order = eventLog_->nextOrder();
         ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
         ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
         eventLog_->push(ev);
-        logObserverActivations(pos, state);
+        logObserverActivations(pos, state, turningOn);
     }
 
     notifyObserverFront(pos, state);
@@ -466,6 +467,23 @@ void Simulator::scheduleUpdate(BlockPos pos, int blockIdValue, int delay) {
         return;
     }
     if (isUpdateScheduled(pos, blockIdValue)) {
+        // Deliberately still silently dropped, unchanged - World::ScheduledTick is keyed only by
+        // (pos, blockId), so this is a real collision, not a bug being fixed here. This log event
+        // exists purely to make that drop visible in the trace (e.g. a piston-pushed observer
+        // landing on a position with a stale pending schedule).
+        if (eventLog_ != nullptr) {
+            SimEvent ev;
+            ev.blockKey = ev.actorKey = stableKey(pos);
+            ev.kind = ScheduledTickDropped;
+            ev.reserved0 = static_cast<std::uint8_t>(blockIdValue & 0xFF);
+            ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+            ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+            ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+            std::uint32_t order = eventLog_->nextOrder();
+            ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+            eventLog_->push(ev);
+        }
         return;
     }
     World::ScheduledTick tick;
@@ -696,7 +714,7 @@ void Simulator::logPistonQueued(BlockPos pistonPos, int direction, bool extend) 
 
 // Source-side scan of an observer's pulse fan-out: emit one ObserverActivated per reacting piston/
 // observer at the block in front and that block's neighbors (the set notifyObserverFront pokes).
-void Simulator::logObserverActivations(BlockPos observerPos, std::uint32_t state) {
+void Simulator::logObserverActivations(BlockPos observerPos, std::uint32_t state, bool turningOn) {
     const Facing& facing = facingByIndex(facingMeta(state));
     BlockPos front = offset(observerPos, opposite(facing));
     std::uint64_t observerKey = stableKey(observerPos);
@@ -711,7 +729,7 @@ void Simulator::logObserverActivations(BlockPos observerPos, std::uint32_t state
         ev.actorKey = observerKey;
         ev.targetKey = stableKey(target);
         ev.kind = ObserverActivated;
-        ev.flags = isPiston ? SEF_TARGET_PISTON : 0;
+        ev.flags = (isPiston ? SEF_TARGET_PISTON : 0) | (turningOn ? SEF_OBSERVER_ON : 0);
         std::uint32_t order = eventLog_->nextOrder();
         ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
         ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;

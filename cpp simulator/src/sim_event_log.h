@@ -43,6 +43,11 @@ enum SimEventKind : std::uint8_t {
     // position that changed (fromPos); reserved0 carries the raw block id that WAS there before the
     // change (sourceBlockId, 0-255, fits in a byte) so a reader isn't forced to infer it.
     PistonNeighborNotified = 15,
+    // scheduleUpdate(pos, id, delay) found an existing ScheduledTick already queued for this exact
+    // (pos, blockId) pair and silently dropped the new one - by design (see World::ScheduledTick's
+    // own doc), this event exists purely so that drop is now visible in the trace. blockKey/actorKey
+    // = stableKey(pos) (whoever currently occupies pos); reserved0 = the blockIdValue attempted.
+    ScheduledTickDropped = 16,
 };
 
 // SimEvent.failureReason (0 = success/none). Populated on the *Blocked and PistonMoveExecuted(blocked)
@@ -62,6 +67,10 @@ enum SimFailureReason : std::uint8_t {
 constexpr std::uint8_t SEF_EXTEND       = 1 << 0; // set = extend, clear = retract
 constexpr std::uint8_t SEF_SUCCESS      = 1 << 1; // set = executed/moved, clear = blocked
 constexpr std::uint8_t SEF_TARGET_PISTON = 1 << 4; // ObserverActivated: target is a piston (else observer)
+constexpr std::uint8_t SEF_OBSERVER_ON   = 1 << 5; // ObserverFired/ObserverActivated: set = the ON
+                                                    // pulse, clear = the OFF transition 2 ticks later
+                                                    // (same function, re-invoked via the scheduled
+                                                    // tick it queued itself).
 
 // ObserverFired cause, stored in flags bits 2-3.
 constexpr std::uint8_t SEC_SCHEDULED       = 0; // generic scheduled pulse
@@ -222,10 +231,14 @@ struct RunSummary {
 // (magic + formatVersion both change) because the footer's own byte size grows here - this codebase's
 // established convention (see SDL2->SDL3) is a new magic per footer-layout change, so a fixed-size
 // footer can always be read with a single EOF-relative seek instead of a reader having to dispatch on
-// formatVersion to learn how big the footer even is.
+// formatVersion to learn how big the footer even is. Bumped SDL4->SDL5 for the new ObserverFired
+// on/off flag bit + ScheduledTickDropped kind - no new fields this time (byte size unchanged), but
+// the magic still moves since the *meaning* of existing bytes (flags) changed underfoot: an old
+// SDL4 reader would otherwise silently misinterpret bit 5 as always-zero/OFF for every historical
+// ObserverFired record.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '4'};
-    std::uint32_t formatVersion = 4;
+    char          magic[4] = {'S', 'D', 'L', '5'};
+    std::uint32_t formatVersion = 5;
     std::uint64_t simulatorBuildHash = 0;
     std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;

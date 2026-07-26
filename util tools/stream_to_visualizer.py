@@ -64,11 +64,13 @@ from websockets.exceptions import ConnectionClosed  # noqa: E402
 _BLOCK_PUSHED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockPushed")
 _PISTON_MOVE_KIND = next(k for k, name in KIND_NAMES.items() if name == "PistonMoveExecuted")
 _OBSERVER_FIRED_KIND = next(k for k, name in KIND_NAMES.items() if name == "ObserverFired")
+_SCHEDULED_DROP_KIND = next(k for k, name in KIND_NAMES.items() if name == "ScheduledTickDropped")
 _PISTON_IDS = {BLOCK_PISTON, BLOCK_STICKY_PISTON}
-# sim_event_log.h's SEF_EXTEND/SEF_SUCCESS flag bits on a PistonMoveExecuted event (not
-# re-exported by transformer_gym.simlog_reader - only verify_simulation_data.py defines them).
+# sim_event_log.h's SEF_EXTEND/SEF_SUCCESS/SEF_OBSERVER_ON flag bits (not re-exported by
+# transformer_gym.simlog_reader - only verify_simulation_data.py defines them).
 _SEF_EXTEND = 1 << 0
 _SEF_SUCCESS = 1 << 1
+_SEF_OBSERVER_ON = 1 << 5
 
 # Numbered so GENERATOR_INDEX below can select one by a plain int, per the user's request.
 # Order/names match generator/tests/test_generators.py's GENERATORS tuple (perturb/forward/puzzle/
@@ -182,6 +184,9 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
 
     # Observer fires: never read before this - ObserverFired (kind 3) carries blockKey/actorKey =
     # the observer's own key, so it maps to a blockIndex exactly like everything else above.
+    # SEF_OBSERVER_ON distinguishes the real ON pulse from the OFF transition 2 ticks later (same
+    # underlying kind, both previously indistinguishable) - the visualizer now shows the observer
+    # as lit exactly between these two, instead of guessing a fixed duration.
     for i, s in enumerate(initial):
         if s.blockTypeId != BLOCK_OBSERVER:
             continue
@@ -192,7 +197,23 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
             if ev.kind != _OBSERVER_FIRED_KIND:
                 continue
             termination_tick = max(termination_tick, ev.executedTick)
-            events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "observerFired", "blockIndex": i})
+            kind = "observerFired" if (ev.flags & _SEF_OBSERVER_ON) else "observerOff"
+            events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": kind, "blockIndex": i})
+
+    # Scheduled-tick collision drop (kind 16): logged purely for diagnosis, see sim_event_log.h's
+    # ScheduledTickDropped doc - the collision itself is intentional/unchanged simulator behavior.
+    # Its subject is whatever block currently occupies the position at drop time, not necessarily
+    # a piston/observer, so it's looped generically over every index entry like BlockPushed is,
+    # rather than pre-filtered by block type.
+    for entry in index:
+        i = key_to_idx.get(entry.originalKey)
+        if i is None:
+            continue
+        for ev in iter_block_events(data, entry):
+            if ev.kind != _SCHEDULED_DROP_KIND:
+                continue
+            termination_tick = max(termination_tick, ev.executedTick)
+            events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "scheduledTickDropped", "blockIndex": i})
 
     events.sort(key=lambda e: (e["tick"], e["order"]))
 
