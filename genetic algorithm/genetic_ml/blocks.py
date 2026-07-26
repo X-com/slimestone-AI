@@ -11,6 +11,10 @@ BLOCK_AIR = 0
 BLOCK_STONE = 1
 BLOCK_GLASS = 20
 BLOCK_DETECTOR_RAIL = 28
+# White glazed terracotta - one representative id from Minecraft 1.12's 235-250 glazed-terracotta
+# color range. Simulator-side: pushable but never pulled/dragged (PushReaction::PushOnly,
+# STICKINESS_NEVER in sim_event_log.h) - unlike glass, demonstrates a distinct, trainable mechanic.
+BLOCK_GLAZED_TERRACOTTA = 235
 BLOCK_STICKY_PISTON = 29
 BLOCK_PISTON = 33
 BLOCK_PISTON_HEAD = 34
@@ -60,7 +64,7 @@ class BlockKind:
 MUTATION_PALETTE: tuple[BlockKind, ...] = (
     BlockKind("air", BLOCK_AIR),
     BlockKind("stone", BLOCK_STONE),
-    BlockKind("glass", BLOCK_GLASS),
+    BlockKind("glazed_terracotta", BLOCK_GLAZED_TERRACOTTA),
     #BlockKind("obsidian", BLOCK_OBSIDIAN),
     BlockKind("slime", BLOCK_SLIME),
     BlockKind("redstone_block", BLOCK_REDSTONE_BLOCK),

@@ -37,7 +37,7 @@ from typing import Any, Callable
 
 from genetic_ml.blocks import (
     BLOCK_AIR,
-    BLOCK_GLASS,
+    BLOCK_GLAZED_TERRACOTTA,
     BLOCK_OBSERVER,
     BLOCK_PISTON,
     BLOCK_PISTON_HEAD,
@@ -138,7 +138,7 @@ def _piston_head(meta: int) -> tuple[str, dict[str, str]]:
 _BLOCK_CONVERTERS: dict[int, Callable[[int], tuple[str, dict[str, str]]]] = {
     BLOCK_AIR: _simple("minecraft:air"),
     BLOCK_STONE: _simple("minecraft:stone"),
-    BLOCK_GLASS: _simple("minecraft:glass"),
+    BLOCK_GLAZED_TERRACOTTA: _simple("minecraft:white_glazed_terracotta"),
     BLOCK_STICKY_PISTON: _piston_like("minecraft:sticky_piston"),
     BLOCK_PISTON: _piston_like("minecraft:piston"),
     BLOCK_PISTON_HEAD: _piston_head,
