@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Training progress</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 2rem; }
+  h1 { font-size: 1.1rem; font-weight: 600; color: #aaa; }
+  #status { color: #888; font-size: 0.85rem; margin-bottom: 1rem; }
+  canvas { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; }
+  #legend { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-top: 0.75rem; font-size: 0.85rem; }
+  .swatch { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; margin-right: 0.4rem; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<h1>Per-mechanic accuracy over training (progress.jsonl, polled every 2s)</h1>
+<div id="status">waiting for data...</div>
+<canvas id="chart" width="900" height="420"></canvas>
+<div id="legend"></div>
+<script>
+const COLORS = {
+  push_order: "#4fc3f7", sticky_drag: "#81c784", non_stick: "#ffb74d",
+  observer_pulse: "#ba68c8", composed: "#e57373",
+};
+const canvas = document.getElementById("chart");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+const legendEl = document.getElementById("legend");
+let lastLen = -1;
+
+function draw(records) {
+  const w = canvas.width, h = canvas.height, pad = 40;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "#333";
+  ctx.beginPath();
+  ctx.moveTo(pad, pad); ctx.lineTo(pad, h - pad); ctx.lineTo(w - pad, h - pad);
+  ctx.stroke();
+  ctx.fillStyle = "#666";
+  ctx.font = "11px sans-serif";
+  for (let v = 0; v <= 1; v += 0.25) {
+    const y = h - pad - v * (h - 2 * pad);
+    ctx.fillText(v.toFixed(2), 4, y + 4);
+    ctx.strokeStyle = "#222";
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+  }
+  if (records.length === 0) return;
+
+  const maxStep = Math.max(...records.map(r => r.step), 1);
+  const mechanics = Object.keys(COLORS);
+  legendEl.innerHTML = "";
+  for (const m of mechanics) {
+    const has = records.some(r => m in (r.mechanic_scores || {}));
+    if (!has) continue;
+    const el = document.createElement("span");
+    el.innerHTML = `<span class="swatch" style="background:${COLORS[m]}"></span>${m}`;
+    legendEl.appendChild(el);
+
+    ctx.strokeStyle = COLORS[m];
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    for (const r of records) {
+      const score = (r.mechanic_scores || {})[m];
+      if (score === undefined) continue;
+      const x = pad + (r.step / maxStep) * (w - 2 * pad);
+      const y = h - pad - score * (h - 2 * pad);
+      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+    }
+    ctx.stroke();
+  }
+
+  // loss curve, dashed, own faint scale note omitted (mechanic accuracy is the point of this page)
+  ctx.strokeStyle = "#666";
+  ctx.setLineDash([4, 4]);
+  const maxLoss = Math.max(...records.map(r => r.loss), 0.001);
+  ctx.beginPath();
+  records.forEach((r, i) => {
+    const x = pad + (r.step / maxStep) * (w - 2 * pad);
+    const y = h - pad - (r.loss / maxLoss) * (h - 2 * pad) * 0.3; // compressed to bottom third
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+async function poll() {
+  try {
+    const res = await fetch("progress.jsonl", { cache: "no-store" });
+    if (!res.ok) { statusEl.textContent = "progress.jsonl not found yet"; return; }
+    const text = await res.text();
+    const records = text.trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
+    if (records.length !== lastLen) {
+      lastLen = records.length;
+      draw(records);
+      const last = records[records.length - 1];
+      statusEl.textContent = last
+        ? `step ${last.step} (${last.phase}), progress=${last.progress.toFixed(2)}, ${records.length} points`
+        : "no points yet";
+    }
+  } catch (e) {
+    statusEl.textContent = "fetch failed: " + e;
+  }
+}
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

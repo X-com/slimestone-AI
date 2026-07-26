@@ -12,18 +12,14 @@ from pathlib import Path
 import torch
 
 from .dataset import SimlogDataset, SimlogDirDataset, collate, fixture_names
+from .mechanics import binary_accuracy as _binary_accuracy
+from .mechanics import mechanic_accuracy
 from .train import train
 
 _GENERATOR_DIR = Path(__file__).resolve().parents[1] / "generator"
 if str(_GENERATOR_DIR) not in sys.path:
     sys.path.insert(0, str(_GENERATOR_DIR))
 from holdout import HOLDOUT_FIXTURES  # noqa: E402
-
-
-def _binary_accuracy(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> float:
-    pred = (logits > 0).float()
-    correct = ((pred == target).float() * mask).sum()
-    return (correct / mask.sum().clamp(min=1)).item()
 
 
 def _report(name: str, model: torch.nn.Module, batch: dict) -> None:
@@ -41,17 +37,27 @@ def _report(name: str, model: torch.nn.Module, batch: dict) -> None:
     print(f"net_shift MAE:           {(out['net_shift'] - batch['y_net_shift']).abs().mean().item():.3f}")
 
 
+def _report_mechanics(title: str, scores: dict[str, float]) -> None:
+    if not scores:
+        print(f"-- {title} -- (no mechanic-tagged samples present)")
+        return
+    print(f"-- {title} --")
+    for tag, score in scores.items():
+        print(f"  {tag:<15} {score:.3f}")
+
+
 def evaluate(
     synthetic_shard_dir: Path | None = None,
     synthetic_train_frac: float = 0.8,
     save_path: Path | None = None,
+    progress_log: Path | None = None,
 ) -> torch.nn.Module:
     names = fixture_names()
     train_names = [n for n in names if n not in HOLDOUT_FIXTURES]
     held_out = [n for n in names if n in HOLDOUT_FIXTURES]
     print(f"training on {len(train_names)} fixtures, holding out {len(held_out)} (generator/holdout.py)")
 
-    model = train(train_names)
+    model = train(train_names, progress_log=progress_log)
     model.eval()
 
     if save_path is not None:
@@ -64,6 +70,19 @@ def evaluate(
         print("no held-out fixtures small enough to encode (see MAX_NODES) - nothing to eval")
     else:
         _report("real held-out fixtures", model, collate(ds.samples))
+        _report_mechanics("held-out mechanic scores (derived tags)", mechanic_accuracy(model, ds.samples))
+
+    # Hand-tagged verification suite (design doc §2/§"Tag source"): the precise ground-truth
+    # cross-check against the coarse derived-tag scores above - if a derived-tag slice looks fine
+    # but its matching hand fixture here doesn't, the derived slice was being carried by a
+    # co-occurring mechanic, not the one it's nominally tracking.
+    from .mechanic_fixtures import build_suite
+
+    suite = build_suite()
+    _report_mechanics(
+        "hand-tagged fixture scores (precise)",
+        {name: mechanic_accuracy(model, [sample])[name] for name, sample, _ in suite},
+    )
 
     if synthetic_shard_dir is not None:
         synth = SimlogDirDataset(synthetic_shard_dir)
@@ -76,6 +95,7 @@ def evaluate(
             print("synthetic shard too small to hold anything out - skipping synthetic curve")
             return model
         _report("synthetic held-out", model, collate(held))
+        _report_mechanics("synthetic held-out mechanic scores (derived tags)", mechanic_accuracy(model, held))
 
     return model
 
