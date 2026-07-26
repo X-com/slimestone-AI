@@ -78,6 +78,13 @@ constexpr std::uint8_t MOVABILITY_POPS       = 2; // pushReaction::Destroy
 constexpr std::uint8_t STICKINESS_NONE       = 0;
 constexpr std::uint8_t STICKINESS_ALL        = 1; // slime
 constexpr std::uint8_t STICKINESS_ALL_EXCEPT_SLIME = 2; // honey (not present in this registry, reserved)
+// PushReaction::PushOnly blocks (glazed terracotta): pushable, but never drags a neighbor and
+// never gets dragged itself, even by an adjacent slime block - matches canPush()'s own
+// `case PushReaction::PushOnly: return facing.index == pushFacing.index;` rule (piston.cpp),
+// which already refuses any perpendicular/pull movement at runtime. This class exists so the
+// static t=0 sticky-component computation (loadCandidate) agrees with that runtime rule instead
+// of gluing these blocks into a component the real physics would never actually drag together.
+constexpr std::uint8_t STICKINESS_NEVER       = 3;
 
 // RunSummary.terminationReason
 enum SimTermination : std::uint8_t {

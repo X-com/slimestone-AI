@@ -2376,7 +2376,9 @@ void Simulator::loadCandidate(const Candidate& candidate) {
             } else {
                 ib.movabilityClass = MOVABILITY_MOVABLE;
             }
-            ib.stickinessClass = (id == BLOCK_SLIME) ? STICKINESS_ALL : STICKINESS_NONE;
+            ib.stickinessClass = (id == BLOCK_SLIME) ? STICKINESS_ALL
+                                : (bd.pushReaction == PushReaction::PushOnly) ? STICKINESS_NEVER
+                                : STICKINESS_NONE;
             ib.componentId = -1;  // filled by the flood-fill below
             ib.isTrigger = samePos(p, candidate.trigger) ? 1 : 0;
             ib.rawState = e.state;
@@ -2385,8 +2387,9 @@ void Simulator::loadCandidate(const Candidate& candidate) {
         }
 
         // ponytail: sticky components use only the slime rule (this registry has no honey block) -
-        // an edge exists between adjacent blocks when at least one is slime and neither is immovable.
-        // Upgrade if a honey block is ever added to block_registry.cpp.
+        // an edge exists between adjacent blocks when at least one is slime, neither is immovable,
+        // and neither is STICKINESS_NEVER (glazed terracotta: never drags, never gets dragged,
+        // matching canPush()'s PushOnly rule at runtime). Upgrade if a honey block is ever added.
         std::vector<ComponentRecord> components;
         std::vector<std::uint64_t> componentMembers;
         std::unordered_map<std::uint64_t, bool> visited;
@@ -2410,6 +2413,7 @@ void Simulator::loadCandidate(const Candidate& candidate) {
                 bmin[1] = std::min(bmin[1], cur.y); bmax[1] = std::max(bmax[1], cur.y);
                 bmin[2] = std::min(bmin[2], cur.z); bmax[2] = std::max(bmax[2], cur.z);
                 if (cur.movabilityClass == MOVABILITY_IMMOVABLE) continue;  // never bridges to neighbors
+                if (cur.stickinessClass == STICKINESS_NEVER) continue;      // glazed terracotta: never drags
                 bool curIsSlime = cur.stickinessClass == STICKINESS_ALL;
                 for (const BlockPos& d : kNeighborDeltas) {
                     std::uint64_t nkey = packPos(cur.x + d.x, cur.y + d.y, cur.z + d.z);
@@ -2417,6 +2421,7 @@ void Simulator::loadCandidate(const Candidate& candidate) {
                     if (nit == keyToInitialIdx.end() || visited[nkey]) continue;
                     const InitialBlockState& nb = initial[static_cast<std::size_t>(nit->second)];
                     if (nb.movabilityClass == MOVABILITY_IMMOVABLE) continue;
+                    if (nb.stickinessClass == STICKINESS_NEVER) continue;   // never gets dragged either
                     bool nIsSlime = nb.stickinessClass == STICKINESS_ALL;
                     if (!curIsSlime && !nIsSlime) continue;  // sticky rule: at least one side is slime
                     visited[nkey] = true;

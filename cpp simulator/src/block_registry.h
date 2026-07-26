@@ -47,6 +47,10 @@ constexpr int BLOCK_PISTON_EXTENSION = 36;
 constexpr int BLOCK_REDSTONE_BLOCK = 152;
 constexpr int BLOCK_SLIME = 165;
 constexpr int BLOCK_OBSERVER = 218;
+// White glazed terracotta - one representative id from the 235-250 glazed-terracotta color range
+// already tagged PushReaction::PushOnly below (real Minecraft's rule: pushable, but never pulled
+// by sticky-piston retraction and never dragged by an adjacent slime/honey block).
+constexpr int BLOCK_GLAZED_TERRACOTTA = 235;
 constexpr int BLOCK_REDSTONE_LAMP = 123;      // unlit
 constexpr int BLOCK_LIT_REDSTONE_LAMP = 124;  // lit
 
