@@ -14,7 +14,7 @@ from .encode import BLOCK_VOCAB, N_KINDS, NO_FACING, RELATION_TYPES
 
 N_TERMINATION = 6  # len(TERMINATION_NAMES)
 N_MOVABILITY = 3
-N_STICKINESS = 3
+N_STICKINESS = 4  # none, sticks-all (slime), sticks-all-except-slime (honey, unused), never-sticks (glazed terracotta)
 
 
 class RelationAttention(nn.Module):

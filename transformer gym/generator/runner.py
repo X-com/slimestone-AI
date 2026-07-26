@@ -22,11 +22,14 @@ class SimRunError(RuntimeError):
     pass
 
 
-def simulate(candidate: Candidate, workdir: Path | None = None) -> bytes:
+def simulate(candidate: Candidate, workdir: Path | None = None, timeout: float = 30.0) -> bytes:
     """Runs `candidate` through the exe with --simulation-data and returns the raw .simlog bytes.
-    Raises SimRunError if the exe isn't built or the run fails (candidate malformed, non-piston
-    trigger, etc.) - callers (the gen_* modules) should catch this per-candidate and skip/retry,
-    since a generator producing an occasional invalid candidate is expected, not fatal."""
+    Raises SimRunError if the exe isn't built, the run fails (candidate malformed, non-piston
+    trigger, etc.), or it exceeds `timeout` seconds - callers (the gen_* modules, corpus.py)
+    should catch this per-candidate and skip/retry, since a generator producing an occasional
+    invalid or pathologically slow candidate is expected, not fatal. The timeout matters more for
+    generators that can produce large/dense boards (e.g. wave_function/) than for the small
+    constructive ones, but applies uniformly since any generator could hit a rare slow case."""
     if not EXE.exists():
         raise SimRunError(f"exe not built: {EXE}")
 
@@ -37,10 +40,13 @@ def simulate(candidate: Candidate, workdir: Path | None = None) -> bytes:
         env = os.environ.copy()
         env["PATH"] = MSYS_BIN + os.pathsep + env.get("PATH", "")
         env["MCP1122_CPP_NO_Y_OFFSET"] = "1"
-        result = subprocess.run(
-            [str(EXE), str(dat), "--simulation-data", str(base)],
-            env=env, capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                [str(EXE), str(dat), "--simulation-data", str(base)],
+                env=env, capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise SimRunError(f"candidate {candidate['id']}: timed out after {timeout}s") from e
         if result.returncode != 0:
             raise SimRunError(f"candidate {candidate['id']}: {result.stderr.strip()[:500]}")
         out = dir_path / f"c{candidate['id']}-{candidate['id']}.simlog"
