@@ -41,7 +41,11 @@ def _report(name: str, model: torch.nn.Module, batch: dict) -> None:
     print(f"net_shift MAE:           {(out['net_shift'] - batch['y_net_shift']).abs().mean().item():.3f}")
 
 
-def evaluate(synthetic_shard_dir: Path | None = None, synthetic_train_frac: float = 0.8) -> None:
+def evaluate(
+    synthetic_shard_dir: Path | None = None,
+    synthetic_train_frac: float = 0.8,
+    save_path: Path | None = None,
+) -> torch.nn.Module:
     names = fixture_names()
     train_names = [n for n in names if n not in HOLDOUT_FIXTURES]
     held_out = [n for n in names if n in HOLDOUT_FIXTURES]
@@ -49,6 +53,11 @@ def evaluate(synthetic_shard_dir: Path | None = None, synthetic_train_frac: floa
 
     model = train(train_names)
     model.eval()
+
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), save_path)
+        print(f"saved model weights to {save_path}")
 
     ds = SimlogDataset(held_out)
     if not ds.samples:
@@ -60,13 +69,15 @@ def evaluate(synthetic_shard_dir: Path | None = None, synthetic_train_frac: floa
         synth = SimlogDirDataset(synthetic_shard_dir)
         if not synth.samples:
             print(f"no samples in {synthetic_shard_dir} - nothing to eval")
-            return
+            return model
         split = max(1, int(len(synth.samples) * synthetic_train_frac))
         held = synth.samples[split:]
         if not held:
             print("synthetic shard too small to hold anything out - skipping synthetic curve")
-            return
+            return model
         _report("synthetic held-out", model, collate(held))
+
+    return model
 
 
 if __name__ == "__main__":
