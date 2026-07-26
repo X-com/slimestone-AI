@@ -39,17 +39,30 @@ GENERATOR_WEIGHTS: tuple[tuple[str, Any, float], ...] = (
 KEEP_DEAD_FRACTION = 0.10
 
 
-def build_corpus(out_dir: Path, count: int, seed: int = 0, max_attempts: int | None = None) -> dict:
-    """Writes up to `count` accepted .simlog files to out_dir. Returns a small stats dict
-    (attempted/accepted/rejected-by-reason) for the caller (generate.py's CLI) to report."""
+def iter_corpus(
+    out_dir: Path,
+    count: int,
+    seed: int = 0,
+    max_attempts: int | None = None,
+    generators: tuple[tuple[str, Any, float], ...] = GENERATOR_WEIGHTS,
+    stats: dict | None = None,
+):
+    """Generates, simulates, dedups, and dead-filters candidates from `generators`, writing each
+    accepted one to out_dir/{name}_{id}.simlog, and yields (name, shard_path) as each is written.
+    build_corpus() below just drains this for its final stats dict; stream_to_visualizer.py's
+    --live mode consumes the same yields to stream a shard out immediately after writing it - the
+    file on disk is always what gets animated, in both modes.
+    `stats` - if provided, updated in place instead of a fresh dict, so a caller can read live
+    progress from another thread/coroutine instead of only the final tally."""
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
-    names = [n for n, _, _ in GENERATOR_WEIGHTS]
-    weights = [w for _, _, w in GENERATOR_WEIGHTS]
-    iterators = {n: gen(rng) for n, gen, _ in GENERATOR_WEIGHTS}
+    names = [n for n, _, _ in generators]
+    weights = [w for _, _, w in generators]
+    iterators = {n: gen(rng) for n, gen, _ in generators}
 
     seen_hashes: set[str] = set()
-    stats = {"attempted": 0, "accepted": 0, "dup": 0, "sim_error": 0, "dead": 0, "too_big": 0}
+    if stats is None:
+        stats = {"attempted": 0, "accepted": 0, "dup": 0, "sim_error": 0, "dead": 0, "too_big": 0}
     max_attempts = max_attempts if max_attempts is not None else count * 20
     next_id = 1
 
@@ -90,5 +103,19 @@ def build_corpus(out_dir: Path, count: int, seed: int = 0, max_attempts: int | N
         seen_hashes.add(h)
         stats["accepted"] += 1
         next_id += 1
+        yield name, shard_path
 
+
+def build_corpus(
+    out_dir: Path,
+    count: int,
+    seed: int = 0,
+    max_attempts: int | None = None,
+    generators: tuple[tuple[str, Any, float], ...] = GENERATOR_WEIGHTS,
+) -> dict:
+    """Writes up to `count` accepted .simlog files to out_dir. Returns a small stats dict
+    (attempted/accepted/rejected-by-reason) for the caller (generate.py's CLI) to report."""
+    stats = {"attempted": 0, "accepted": 0, "dup": 0, "sim_error": 0, "dead": 0, "too_big": 0}
+    for _ in iter_corpus(out_dir, count, seed=seed, max_attempts=max_attempts, generators=generators, stats=stats):
+        pass
     return stats

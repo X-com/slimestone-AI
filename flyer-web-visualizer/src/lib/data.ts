@@ -32,6 +32,53 @@ export interface Result {
   ticksPerSecond: number
 }
 
+// One real, simulator-reported keyframe (tick/order/x/y/z copied verbatim from the .simlog's own
+// SimEvent fields by stream_to_visualizer.py's build_animation_record - never synthesized).
+// `order` breaks ties between same-tick events; it is NOT a sub-tick timing value (see that
+// script's docstring on executedSubtick).
+export interface MoveStep {
+  tick: number
+  order: number
+  x: number
+  y: number
+  z: number
+}
+export interface BlockMove {
+  blockIndex: number // index into candidate.blocks
+  steps: MoveStep[]
+}
+
+// A piston/sticky_piston's extend/retract timeline - the head isn't a separate block in the
+// initial state (it only exists once extended), so it can't be tracked as a "moved" block the
+// way BlockMove is; instead each piston gets its own real extended/retracted keyframes, starting
+// from its true t=0 state (steps[0].tick is always 0).
+export interface ExtensionStep {
+  tick: number
+  order: number
+  extended: boolean
+}
+export interface BlockExtension {
+  blockIndex: number // index into candidate.blocks - always a piston or sticky_piston
+  steps: ExtensionStep[]
+}
+
+// One real logged event, in true recorded (tick, order) order - the itemized log the /generator
+// page's tick/subtick stepper walks through to verify event ordering. `blockPushed`/`pistonExtend`/
+// `pistonRetract` are redundant with moves/extensions (same keyframes, just flattened into one
+// timeline); `pistonBlocked`/`observerFired` are the two effects moves/extensions can't show at all.
+export type MachineEventKind =
+  | 'blockPushed'
+  | 'pistonExtend'
+  | 'pistonRetract'
+  | 'pistonBlocked'
+  | 'observerFired'
+export interface MachineEvent {
+  tick: number
+  order: number
+  kind: MachineEventKind
+  blockIndex: number
+}
+
 export interface Machine {
   hash: string // unique id + selection key (archive: structural hash; uploaded: synthetic)
   label?: string // float text override (uploaded uses "#id"); archive falls back to hash[:8]
@@ -42,6 +89,13 @@ export interface Machine {
   candidate: Candidate
   result: Result | null // null for uploaded bare candidates (no simulation metadata)
   found_at: string
+  // Present only on machines decoded from the /generator page's stream (parseGeneratorRecords) -
+  // the real per-tick move/extension timelines read straight from the .simlog, animated by
+  // animatedScene.ts.
+  moves?: BlockMove[]
+  extensions?: BlockExtension[]
+  events?: MachineEvent[]
+  terminationTick?: number
 }
 
 export async function loadMachines(
@@ -136,4 +190,40 @@ export function parseCompactData(name: string, buf: ArrayBuffer): Machine[] {
     index++
   }
   return machines
+}
+
+// /generator page's wire format (mirrors generator/stream_to_visualizer.py's build_animation_record):
+// newline-separated JSON records, {trigger, blocks, moves, extensions, terminationTick, name}.
+// JSON (not the binary compact format above) because it also has to carry the per-block move/
+// extension timelines, which aren't fixed-size the way a plain block list is.
+interface GeneratorRecord {
+  name: string
+  trigger: Vec3
+  blocks: Block[]
+  moves: BlockMove[]
+  extensions: BlockExtension[]
+  events: MachineEvent[]
+  terminationTick: number
+}
+
+export function parseGeneratorRecords(frame: string): Machine[] {
+  return frame
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as GeneratorRecord)
+    .map((r) => ({
+      hash: `gen:${r.name}`,
+      label: r.name,
+      source: r.name,
+      generation: 0,
+      origin: 'generator',
+      block_count: r.blocks.length,
+      candidate: { id: 0, trigger: r.trigger, blocks: r.blocks },
+      result: null,
+      found_at: '',
+      moves: r.moves,
+      extensions: r.extensions,
+      events: r.events,
+      terminationTick: r.terminationTick,
+    }))
 }

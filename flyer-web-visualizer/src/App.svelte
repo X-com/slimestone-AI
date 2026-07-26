@@ -2,15 +2,18 @@
   import Router, { link, router } from 'svelte-spa-router'
   import MachineExplorer from './MachineExplorer.svelte'
   import TrainingDashboard from './TrainingDashboard.svelte'
+  import GeneratorPreview from './GeneratorPreview.svelte'
 
   const routes = {
     '/': MachineExplorer,
     '/live': TrainingDashboard,
+    '/generator': GeneratorPreview,
   }
 
   const navLinks = [
     ['/', 'Explorer'],
     ['/live', 'Live Training'],
+    ['/generator', 'Generator Preview'],
   ] as const
 </script>
 
