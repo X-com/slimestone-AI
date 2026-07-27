@@ -6,3 +6,4 @@ cpp simulator/flying-json-compact
 **/build
 **/.venv
 **/.pytest_cache
+/ignore
