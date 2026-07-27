@@ -7,6 +7,7 @@
 // the block's facing. Glass is alpha-tested (opaque frame / clear pane), slime is
 // translucent; everything else is opaque.
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 
 const TEX_NAMES = [
   'stone', 'glass', 'slime', 'redstone_block',
@@ -46,6 +47,9 @@ const TEX_NAMES = [
   'shulker_top_red', 'shulker_top_silver', 'shulker_top_white', 'shulker_top_yellow', 'snow', 'soul_sand', 'sponge', 'stone_slab_side',
   'stone_slab_top', 'stonebrick', 'structure_block', 'tnt_bottom', 'tnt_side', 'tnt_top', 'trapdoor', 'waterlily',
   'wool_colored_white',
+  // The piston body's own front face while extended (the head has left, exposing the plain
+  // track/frame) - see the piston-inner overlay in animatedScene.ts.
+  'piston_inner',
 ] as const
 type TexName = (typeof TEX_NAMES)[number]
 
@@ -288,6 +292,12 @@ export interface BlockAssets {
   // the real block underneath without needing to enlarge the geometry (which would show edges).
   observerOnGeo: THREE.BufferGeometry
   observerOnMat: THREE.Material
+  // A piston body's face while extended (the head has slid away, exposing the plain track
+  // texture instead of the piston-top/sticky face) - keyed by the piston's own blockId (29
+  // sticky, 33 regular) since each has a different side texture. Overlaid the same way as
+  // observerOnGeo/observerOnMat (polygonOffset, no size change).
+  pistonInnerGeo(blockId: number): THREE.BufferGeometry | undefined
+  pistonInnerMat: THREE.Material
   dispose(): void
 }
 
@@ -328,8 +338,15 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
   atlas.wrapS = atlas.wrapT = THREE.ClampToEdgeWrapping
 
   const PAD = 0.5 / CELL // half-texel inset so nearest sampling never bleeds into the next cell
-  function bake(faces: readonly TexName[]): THREE.BufferGeometry {
-    const geo = new THREE.BoxGeometry(1, 1, 1)
+  // size/offset let non-cube blocks (rails, trapdoors, fence gates, a piston head's cap/rod) bake
+  // a squashed/shifted box instead of a full unit cube - BoxGeometry's 24-vertex/6-face layout is
+  // identical regardless of dimensions, so the UV-baking loop below needs no changes for this.
+  function bake(
+    faces: readonly TexName[],
+    size: readonly [number, number, number] = [1, 1, 1],
+    offset: readonly [number, number, number] = [0, 0, 0],
+  ): THREE.BufferGeometry {
+    const geo = new THREE.BoxGeometry(...size)
     const uv = geo.attributes.uv as THREE.BufferAttribute
     for (let f = 0; f < 6; f++) {
       const { col, row } = cellOf(faces[f])
@@ -341,6 +358,7 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
       }
     }
     uv.needsUpdate = true
+    if (offset[0] || offset[1] || offset[2]) geo.translate(...offset)
     return geo
   }
 
@@ -348,12 +366,50 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
   for (const id of Object.keys(FACES)) geos.set(Number(id), bake(FACES[Number(id)]))
   const fallbackGeo = bake(FACES[1]) // unknown ids render as stone
 
+  // Non-cube blocks: still one geometry per id (shared across all instances, like every other
+  // block), just squashed/offset instead of a full unit cube - a shape approximation (real
+  // rotation-dependent placement like an open trapdoor or a curved rail isn't modeled), but reads
+  // as the right kind of thing instead of a solid block.
+  const RAIL_IDS = [27, 28, 66, 157] // golden/detector/rail/activator - thin plate on the floor
+  for (const id of RAIL_IDS) {
+    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 1 / 16, 1], [0, -0.5 + 1 / 32, 0]))
+  }
+  const TRAPDOOR_IDS = [96, 167] // closed, bottom-attached (the common case) - thin panel on the floor
+  for (const id of TRAPDOOR_IDS) {
+    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 3 / 16, 1], [0, -0.5 + 3 / 32, 0]))
+  }
+  const FENCE_GATE_IDS = [107, 183, 184, 185, 186, 187] // closed - a thin post/bar slab, not a solid block
+  for (const id of FENCE_GATE_IDS) {
+    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 1, 3 / 16], [0, 0, 0]))
+  }
+
+  // Piston head: a thin cap (the visible face) plus a narrower rod reaching back toward the body -
+  // two boxes merged into one geometry, each baked/UV-mapped the same way as any other block.
+  geos.set(
+    34,
+    mergeGeometries([
+      bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_top', 'piston_side'], [1, 1, 4 / 16], [0, 0, 0.5 - 2 / 16]),
+      bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side'], [4 / 16, 4 / 16, 12 / 16], [0, 0, -0.125]),
+    ]),
+  )
+
   // Observer "on" box - same face layout as FACES[218] (side/side/top/top/front/back) but using
   // the DABB-powered variant of every face, baked with the same helper as any other block.
   const observerOnGeo = bake(['observer_side_on', 'observer_side_on', 'observer_top_on', 'observer_top_on', 'observer_front_on', 'observer_back_on'])
   const observerOnMat = new THREE.MeshLambertMaterial({
     map: atlas,
     polygonOffset: true, // wins the z-fight against the real (identically-sized/positioned) observer underneath
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
+  })
+
+  const pistonInnerGeos = new Map<number, THREE.BufferGeometry>([
+    [33, bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_inner', 'piston_side'])],
+    [29, bake(['piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky', 'piston_inner', 'piston_side_sticky'])],
+  ])
+  const pistonInnerMat = new THREE.MeshLambertMaterial({
+    map: atlas,
+    polygonOffset: true, // wins the z-fight against the real (identically-sized/positioned) piston body underneath
     polygonOffsetFactor: -4,
     polygonOffsetUnits: -4,
   })
@@ -372,12 +428,16 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
       CUTOUT.has(id) ? matCutout : TRANSLUCENT.has(id) ? matTranslucent : matOpaque,
     observerOnGeo,
     observerOnMat,
+    pistonInnerGeo: (id) => pistonInnerGeos.get(id),
+    pistonInnerMat,
     dispose() {
       atlas.dispose()
       for (const g of geos.values()) g.dispose()
       fallbackGeo.dispose()
       observerOnGeo.dispose()
       observerOnMat.dispose()
+      for (const g of pistonInnerGeos.values()) g.dispose()
+      pistonInnerMat.dispose()
       matOpaque.dispose()
       matCutout.dispose()
       matTranslucent.dispose()

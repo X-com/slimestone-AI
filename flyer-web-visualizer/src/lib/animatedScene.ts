@@ -200,6 +200,12 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   let blockedOverlays: EffectOverlay[] = []
   let observerOverlays: EffectOverlay[] = []
   let droppedOverlays: EffectOverlay[] = []
+  let pistonInnerOverlays: EffectOverlay[] = []
+  // A piston's own current extension blend (0..1), recorded by renderHead every frame - drives
+  // pistonInnerOverlays (the body's face swaps to the plain track texture whenever blend > 0,
+  // matching real Minecraft: the body face changes the instant it starts extending, it doesn't
+  // fade in). Pistons that never extend simply never get an entry, so default to 0 (retracted).
+  let pistonBlendByIndex = new Map<number, number>()
   // Tick lists (not single events) a piston is "blocked" / a scheduledTickDropped fired at - see
   // isActiveAtTick: both are one-shot instants, held visible for exactly the tick they land in.
   let blockedTicksByIndex = new Map<number, number[]>()
@@ -231,6 +237,8 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     blockedOverlays = []
     observerOverlays = []
     droppedOverlays = []
+    pistonInnerOverlays = []
+    pistonBlendByIndex = new Map()
     blockedTicksByIndex = new Map()
     droppedTicksByIndex = new Map()
     observerIntervalsByIndex = new Map()
@@ -312,6 +320,10 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     for (const ov of blockedOverlays) {
       const pos = livePositionNow(ov.blockIndex, ov.staticPos)
       setOverlayVisible(ov, pos, isActiveAtTick(blockedTicksByIndex, ov.blockIndex, t, 1))
+    }
+    for (const ov of pistonInnerOverlays) {
+      const pos = livePositionNow(ov.blockIndex, ov.staticPos)
+      setOverlayVisible(ov, pos, (pistonBlendByIndex.get(ov.blockIndex) ?? 0) > 0.001)
     }
     for (const ov of observerOverlays) {
       const pos = livePositionNow(ov.blockIndex, ov.staticPos)
@@ -429,16 +441,28 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       { blockIndex: -1, pos: toWorld(machine.candidate.trigger.x, machine.candidate.trigger.y, machine.candidate.trigger.z) },
     ])[0] ?? null
     const pistonEntries: { blockIndex: number; pos: THREE.Vector3 }[] = []
+    const pistonInnerEntriesByBlockId = new Map<number, { blockIndex: number; pos: THREE.Vector3; quat: THREE.Quaternion }[]>()
     const observerEntries: { blockIndex: number; pos: THREE.Vector3; quat: THREE.Quaternion }[] = []
     blocks.forEach((blk, i) => {
       const id = decodeState(blk.state).blockId
-      if (id === 29 || id === 33) pistonEntries.push({ blockIndex: i, pos: toWorld(blk.x, blk.y, blk.z) })
-      else if (id === 218) {
+      if (id === 29 || id === 33) {
+        const pos = toWorld(blk.x, blk.y, blk.z)
+        pistonEntries.push({ blockIndex: i, pos })
+        const list = pistonInnerEntriesByBlockId.get(id) ?? []
+        list.push({ blockIndex: i, pos, quat: quatByIndex.get(i) ?? new THREE.Quaternion() })
+        pistonInnerEntriesByBlockId.set(id, list)
+      } else if (id === 218) {
         observerEntries.push({ blockIndex: i, pos: toWorld(blk.x, blk.y, blk.z), quat: quatByIndex.get(i) ?? new THREE.Quaternion() })
       }
     })
     blockedOverlays = buildOverlay(overlayGeo, blockedMat, pistonEntries)
     observerOverlays = assets ? buildOverlay(assets.observerOnGeo, assets.observerOnMat, observerEntries) : []
+    pistonInnerOverlays = assets
+      ? [...pistonInnerEntriesByBlockId].flatMap(([id, entries]) => {
+          const geo = assets.pistonInnerGeo(id)
+          return geo ? buildOverlay(geo, assets.pistonInnerMat, entries) : []
+        })
+      : []
 
     events = machine.events ?? []
     terminationTick = machine.terminationTick ?? 0
@@ -503,6 +527,7 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   }
 
   function renderHead(head: AnimatedHead, blend: number, bodyPos: THREE.Vector3) {
+    pistonBlendByIndex.set(head.blockIndex, blend)
     dummy.position.copy(bodyPos).addScaledVector(head.facing, blend)
     dummy.quaternion.copy(head.quat)
     // Fully retracted (blend 0) puts the head at the exact same spot as the piston body - scale
