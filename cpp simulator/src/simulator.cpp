@@ -311,7 +311,49 @@ void Simulator::lampUpdateTick(BlockPos pos, std::uint32_t state) {
     // machine never pulsed. Mirrors mcp1122 BlockRedstoneLight.updateTick.
     if (blockId(state) == BLOCK_LIT_REDSTONE_LAMP && !isBlockPowered(pos)) {
         setBlockState(pos, makeState(BLOCK_REDSTONE_LAMP, 0), 2);
+        logPoweredChanged(pos, BLOCK_LIT_REDSTONE_LAMP, false);
     }
+}
+
+// simulation_data: a rail/fence-gate/trapdoor/lamp toggled its own powered/open/lit state. One
+// shared emitter since all four are the same shape of event (a stateful on/off bit belonging to
+// the block itself, not caused by a piston/observer/redstone-block actor) - see BlockPoweredChanged.
+void Simulator::logPoweredChanged(BlockPos pos, int rawBlockId, bool on) {
+    if (eventLog_ == nullptr) {
+        return;
+    }
+    SimEvent ev;
+    ev.blockKey = ev.actorKey = stableKey(pos);
+    ev.kind = BlockPoweredChanged;
+    ev.reserved0 = static_cast<std::uint8_t>(rawBlockId & 0xFF);
+    ev.flags = on ? SEF_POWERED_ON : 0;
+    std::uint32_t order = eventLog_->nextOrder();
+    ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+    ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+    ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+    ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+    ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+    eventLog_->push(ev);
+}
+
+// simulation_data: a block vanished from the world outside of a piston push - currently only a
+// rail losing its supporting block (railNeighborChanged). Without this the visualizer has no
+// signal that the block is gone and keeps rendering it forever at its original spot.
+void Simulator::logBlockDestroyed(BlockPos pos, int rawBlockId) {
+    if (eventLog_ == nullptr) {
+        return;
+    }
+    SimEvent ev;
+    ev.blockKey = ev.actorKey = stableKey(pos);
+    ev.kind = BlockDestroyed;
+    ev.reserved0 = static_cast<std::uint8_t>(rawBlockId & 0xFF);
+    std::uint32_t order = eventLog_->nextOrder();
+    ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+    ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+    ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+    ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+    ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+    eventLog_->push(ev);
 }
 
 // Mirrors BlockObserver.updateNeighborsInFront: pokes the block the observer is facing away
@@ -566,6 +608,7 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
         if (metaBit(state, 3) != powered) {
             std::uint32_t newState = setMetaBit(setMetaBit(state, 3, powered), 2, powered);
             setBlockState(pos, newState, 2);
+            logPoweredChanged(pos, id, powered);
         }
     } else if (id == BLOCK_TRAPDOOR || id == BLOCK_IRON_TRAPDOOR) {
         // mcp1122 BlockTrapDoor.neighborChanged: bit 2 is the OPEN flag (no separate
@@ -586,6 +629,7 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
             }
             if (changed) {
                 setBlockState(pos, setMetaBit(state, 2, powered), 2);
+                logPoweredChanged(pos, id, powered);
             }
         } else if (trace_ != nullptr) {
             trace_->log(world_, "trap.nc", &pos, (powered ? 1 : 0) | (canProvide ? 2 : 0) | (oldOpen ? 4 : 0), 0);
@@ -600,6 +644,7 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
         // Unlit lamp gaining power turns on immediately.
         if (isBlockPowered(pos)) {
             setBlockState(pos, makeState(BLOCK_LIT_REDSTONE_LAMP, 0), 2);
+            logPoweredChanged(pos, BLOCK_REDSTONE_LAMP, true);
         }
     } else if (isRailBlock(id)) {
         railNeighborChanged(pos, state);
@@ -997,6 +1042,7 @@ void Simulator::railNeighborChanged(BlockPos pos, std::uint32_t state) {
 
     if (unsupported) {
         if (!isAirState(world_.getBlock(pos))) {
+            logBlockDestroyed(pos, id);
             setBlockToAir(pos);
         }
         return;
@@ -1024,6 +1070,7 @@ void Simulator::updateRailPowerState(BlockPos pos, std::uint32_t state, int rail
 
     if (nowPowered != wasPowered) {
         setBlockState(pos, setMetaBit(state, 3, nowPowered), 3);
+        logPoweredChanged(pos, railId, nowPowered);
         notifyNeighbors(offset(pos, facings()[0]), railId, false); // DOWN
         if (isAscendingRailShape(shape)) {
             notifyNeighbors(offset(pos, facings()[1]), railId, false); // UP

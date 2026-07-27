@@ -18,8 +18,11 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { BLOCK_TYPES, decodeState } from './blocks'
-import { loadBlockAssets, frontAxis, type BlockAssets } from './textures'
-import type { Machine, MachineEvent } from './data'
+import {
+  loadBlockAssets, frontAxis, toggleBaseKeyFor, toggleAltKeyFor, isRail, railQuaternion,
+  observerQuaternion, BLOCK_LIT_REDSTONE_LAMP, type BlockAssets,
+} from './textures'
+import type { Machine, MachineEvent, PoweredStep } from './data'
 
 // Playback speed only - a display choice, not simulated timing. Real Minecraft ticks aren't
 // evenly spaced in wall-clock terms here either; this just picks a watchable pace. User-adjustable
@@ -93,6 +96,35 @@ interface EffectOverlay {
   blockIndex: number
   staticPos: THREE.Vector3 // fallback for a piston/observer that never itself moves
   quat: THREE.Quaternion // facing rotation to render at - identity for non-directional overlays
+}
+
+// A single mesh instance, referenced for per-frame visibility toggling only (position/rotation
+// never change - see applyInstanceTransform). Shared shape for both toggleEntries' base/alt pair
+// and destroyed's one-shot hide.
+interface MeshInstanceRef {
+  mesh: THREE.InstancedMesh
+  instanceIndex: number
+}
+
+// A togglable block (fence gate/trapdoor/powerable rail/lamp): both its "off" and "on" look exist
+// as permanent instances at the same spot - updateToggleVisuals flips which one is scaled to 1
+// each frame from poweredIntervalsByIndex, instead of a colored glow layered on top of one shape.
+interface ToggleEntry {
+  blockIndex: number
+  pos: THREE.Vector3
+  quat: THREE.Quaternion
+  base: MeshInstanceRef
+  alt: MeshInstanceRef
+}
+
+// A block that vanished outside of a piston push (currently: a rail losing its support) - hidden
+// from its one BlockDestroyed tick onward instead of staying rendered forever at its last spot.
+interface DestroyedEntry {
+  ref: MeshInstanceRef
+  pos: THREE.Vector3
+  quat: THREE.Quaternion
+  tick: number
+  order: number
 }
 
 // Holds at `cur.pos` for the whole gap since the previous keyframe, then animates into `next.pos`
@@ -211,9 +243,16 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   let blockedTicksByIndex = new Map<number, number[]>()
   let droppedTicksByIndex = new Map<number, number[]>()
   // An observer's real on/off interval, paired from its own alternating observerFired/observerOff
-  // stream - see isObserverActiveAtTick. Replaces the old fixed-duration OBSERVER_ON_TICKS guess
-  // now that the simulator actually logs the off transition.
-  let observerIntervalsByIndex = new Map<number, { on: number; off: number }[]>()
+  // stream - see isObserverActiveAtTick/isObserverActiveAtEvent. Keeps the full (tick, order) pair
+  // for each edge, not just the tick - multiple observers can fire within the same tick (real
+  // Minecraft ticks many blocks per game tick), and only `order` (the simlog's own subtick
+  // sequence number) actually distinguishes which one happened first.
+  let observerIntervalsByIndex = new Map<number, { onTick: number; onOrder: number; offTick: number; offOrder: number }[]>()
+  // Same shape, for a rail (golden/activator)/fence gate/trapdoor/lamp's own on/open/lit interval -
+  // see isIntervalActiveAtTick/isIntervalActiveAtEvent, shared with the observer overlay above.
+  let poweredIntervalsByIndex = new Map<number, { onTick: number; onOrder: number; offTick: number; offOrder: number }[]>()
+  let toggleEntries: ToggleEntry[] = []
+  let destroyed: DestroyedEntry[] = []
   let events: MachineEvent[] = []
   let eventIndex = -1 // -1 = the real t=0 initial state, before any logged event
   let mode: 'auto' | 'manual' = 'auto'
@@ -238,10 +277,13 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     observerOverlays = []
     droppedOverlays = []
     pistonInnerOverlays = []
+    toggleEntries = []
+    destroyed = []
     pistonBlendByIndex = new Map()
     blockedTicksByIndex = new Map()
     droppedTicksByIndex = new Map()
     observerIntervalsByIndex = new Map()
+    poweredIntervalsByIndex = new Map()
     events = []
     eventIndex = -1
     mode = 'auto'
@@ -293,26 +335,55 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     return ticks !== undefined && ticks.some((tick) => t >= tick && t < tick + durationTicks)
   }
 
-  // An observer's real on/off interval, now that the simlog actually logs both transitions (see
-  // stream_to_visualizer.py's observerFired/observerOff split) - lit exactly between its own fire
-  // and the matching off, half-open on the low end / open on the high end.
-  function isObserverActiveAtTick(blockIndex: number, t: number): boolean {
-    const intervals = observerIntervalsByIndex.get(blockIndex)
-    return intervals !== undefined && intervals.some((iv) => t >= iv.on && t < iv.off)
+  // An observer/rail/fence-gate/trapdoor/lamp's real on/off interval, now that the simlog actually
+  // logs both transitions (see stream_to_visualizer.py's observerFired/observerOff and
+  // BlockPoweredChanged handling) - lit exactly between its own on-edge and the matching off-edge,
+  // half-open on the low end / open on the high end. Generic over which interval map so the
+  // observer overlay and the powered overlay share one implementation. Auto (continuous
+  // wall-clock) playback only compares whole ticks - see isIntervalActiveAtEvent for the
+  // subtick-exact version manual stepping uses.
+  type Interval = { onTick: number; onOrder: number; offTick: number; offOrder: number }
+  function isIntervalActiveAtTick(intervalsByIndex: Map<number, Interval[]>, blockIndex: number, t: number): boolean {
+    const intervals = intervalsByIndex.get(blockIndex)
+    return intervals !== undefined && intervals.some((iv) => t >= iv.onTick && t < iv.offTick)
   }
 
-  function setOverlayVisible(ov: EffectOverlay, pos: THREE.Vector3, visible: boolean) {
+  // Manual (event-pointer) mode's exact version: compares the full (tick, order) pair, not just
+  // the tick, so two blocks that fire within the same tick still show a distinct on/off instant as
+  // the user steps subtick-by-subtick - this is the whole point of that stepper (see
+  // AnimatedSceneHandle.stepSubtick's doc: "iterate through the logs to verify the order").
+  function atOrAfter(t: number, o: number, refT: number, refO: number): boolean {
+    return t > refT || (t === refT && o >= refO)
+  }
+  function isIntervalActiveAtEvent(intervalsByIndex: Map<number, Interval[]>, blockIndex: number, tick: number, order: number): boolean {
+    const intervals = intervalsByIndex.get(blockIndex)
+    return (
+      intervals !== undefined &&
+      intervals.some(
+        (iv) => atOrAfter(tick, order, iv.onTick, iv.onOrder) && !atOrAfter(tick, order, iv.offTick, iv.offOrder),
+      )
+    )
+  }
+
+  // Shared by every "just toggle whether this fixed-shape instance shows" case (effect overlays,
+  // toggleEntries' base/alt pair, destroyed) - position/rotation never change, only scale 0 vs 1.
+  function applyInstanceTransform(ref: MeshInstanceRef, pos: THREE.Vector3, quat: THREE.Quaternion, visible: boolean) {
     dummy.position.copy(pos)
-    dummy.quaternion.copy(ov.quat)
+    dummy.quaternion.copy(quat)
     const s = visible ? 1 : 0
     dummy.scale.set(s, s, s)
     dummy.updateMatrix()
-    ov.mesh.setMatrixAt(ov.instanceIndex, dummy.matrix)
-    ov.mesh.instanceMatrix.needsUpdate = true
+    ref.mesh.setMatrixAt(ref.instanceIndex, dummy.matrix)
+    ref.mesh.instanceMatrix.needsUpdate = true
+  }
+
+  function setOverlayVisible(ov: EffectOverlay, pos: THREE.Vector3, visible: boolean) {
+    applyInstanceTransform(ov, pos, ov.quat, visible)
   }
 
   function updateEffectOverlays() {
     const t = mode === 'manual' ? (eventIndex < 0 ? 0 : events[eventIndex].tick) : currentTick()
+    const order = eventIndex < 0 ? -1 : events[eventIndex].order // manual mode only - see isObserverActiveAtEvent
     if (triggerOverlay) {
       // "at tick zero and subtick zero" = paused, before any event has run yet.
       setOverlayVisible(triggerOverlay, triggerOverlay.staticPos, mode === 'manual' && eventIndex < 0)
@@ -327,11 +398,42 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     }
     for (const ov of observerOverlays) {
       const pos = livePositionNow(ov.blockIndex, ov.staticPos)
-      setOverlayVisible(ov, pos, isObserverActiveAtTick(ov.blockIndex, t))
+      const active = mode === 'manual'
+        ? isIntervalActiveAtEvent(observerIntervalsByIndex, ov.blockIndex, t, order)
+        : isIntervalActiveAtTick(observerIntervalsByIndex, ov.blockIndex, t)
+      setOverlayVisible(ov, pos, active)
     }
     for (const ov of droppedOverlays) {
       const pos = livePositionNow(ov.blockIndex, ov.staticPos)
       setOverlayVisible(ov, pos, isActiveAtTick(droppedTicksByIndex, ov.blockIndex, t, 1))
+    }
+  }
+
+  // A togglable block's real look: base ("off") and alt ("on") both always exist at the same
+  // spot - exactly one is scaled to 1 each frame, from the same on/off interval data the removed
+  // golden-glow overlay used to just decorate on top of a single fixed shape.
+  function updateToggleVisuals() {
+    const t = mode === 'manual' ? (eventIndex < 0 ? 0 : events[eventIndex].tick) : currentTick()
+    const order = eventIndex < 0 ? -1 : events[eventIndex].order
+    for (const e of toggleEntries) {
+      const pos = livePositionNow(e.blockIndex, e.pos)
+      const on = mode === 'manual'
+        ? isIntervalActiveAtEvent(poweredIntervalsByIndex, e.blockIndex, t, order)
+        : isIntervalActiveAtTick(poweredIntervalsByIndex, e.blockIndex, t)
+      applyInstanceTransform(e.base, pos, e.quat, !on)
+      applyInstanceTransform(e.alt, pos, e.quat, on)
+    }
+  }
+
+  // A destroyed block (currently: a rail that lost its support) is a one-shot, one-way transition
+  // - hidden from its own tick onward, reappearing only if auto-mode's loop wraps back past it
+  // (currentTick() already wraps, so t >= d.tick naturally goes false again at the top of a loop).
+  function updateDestroyed() {
+    const t = mode === 'manual' ? (eventIndex < 0 ? 0 : events[eventIndex].tick) : currentTick()
+    const order = eventIndex < 0 ? -1 : events[eventIndex].order
+    for (const d of destroyed) {
+      const isGone = mode === 'manual' ? atOrAfter(t, order, d.tick, d.order) : t >= d.tick
+      applyInstanceTransform(d.ref, d.pos, d.quat, !isGone)
     }
   }
 
@@ -357,15 +459,26 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       const d = decodeState(blk.state)
       const quat = new THREE.Quaternion()
       const axis = frontAxis(d.blockId)
-      if (axis) quat.setFromUnitVectors(axis, new THREE.Vector3(...d.facingVec))
+      if (isRail(d.blockId)) {
+        quat.copy(railQuaternion(d.meta)) // rails: shape is the raw meta, not the 6-way facing scheme
+      } else if (d.blockId === 218) {
+        quat.copy(observerQuaternion(d.facing)) // exact vanilla per-facing rotation, not a generic derived one
+      } else if (axis) {
+        quat.setFromUnitVectors(axis, new THREE.Vector3(...d.facingVec))
+      }
       quatByIndex.set(i, quat)
       dummy.position.copy(toWorld(blk.x, blk.y, blk.z))
       dummy.quaternion.copy(quat)
       dummy.scale.set(1, 1, 1)
       dummy.updateMatrix()
-      const list = byId.get(d.blockId) ?? []
+      // Every togglable block (fence gate/trapdoor/powerable rail/lamp) always renders its "off"
+      // look here, regardless of its own actual meta - see toggleBaseKeyFor's doc. Its "on" look
+      // (if it has one) is a separate always-present instance in a different mesh, toggled by
+      // updateToggleVisuals - see toggleEntries below.
+      const key = toggleBaseKeyFor(d.blockId, d.meta)
+      const list = byId.get(key) ?? []
       list.push({ blockIndex: i, matrix: dummy.matrix.clone(), quat })
-      byId.set(d.blockId, list)
+      byId.set(key, list)
     })
 
     const indexInMesh = new Map<number, { mesh: THREE.InstancedMesh; instanceIndex: number; quat: THREE.Quaternion }>()
@@ -477,13 +590,51 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     })
     droppedOverlays = buildOverlay(overlayGeo, droppedMat, droppedEntries)
 
+    // Every togglable block's "on" look, built as a second permanent instance next to its base
+    // one - see toggleAltKeyFor/updateToggleVisuals. Grouped by synthetic alt key so e.g. every
+    // open fence gate in the machine still shares one InstancedMesh, same as any other block type.
+    const toggleAltEntriesByKey = new Map<number, { blockIndex: number; pos: THREE.Vector3; quat: THREE.Quaternion }[]>()
+    blocks.forEach((blk, i) => {
+      const d = decodeState(blk.state)
+      const altKey = toggleAltKeyFor(d.blockId, d.meta)
+      if (altKey === null || !indexInMesh.has(i)) return
+      const list = toggleAltEntriesByKey.get(altKey) ?? []
+      list.push({ blockIndex: i, pos: toWorld(blk.x, blk.y, blk.z), quat: quatByIndex.get(i) ?? new THREE.Quaternion() })
+      toggleAltEntriesByKey.set(altKey, list)
+    })
+    toggleEntries = assets
+      ? [...toggleAltEntriesByKey].flatMap(([altKey, entries]) =>
+          buildOverlay(assets.geo(altKey), assets.material(altKey), entries).map((alt) => {
+            const base = indexInMesh.get(alt.blockIndex)!
+            return { blockIndex: alt.blockIndex, pos: alt.staticPos, quat: alt.quat, base, alt }
+          }),
+        )
+      : []
+
+    // A destroyed block (currently: a rail that lost its support) - keep only its first such
+    // event per blockIndex (a destroyed block doesn't come back), same "not pre-enumerable by
+    // block type" reasoning as scheduledTickDropped above.
+    const destroyedFirstByIndex = new Map<number, { tick: number; order: number }>()
+    for (const e of events) {
+      if (e.kind === 'blockDestroyed' && !destroyedFirstByIndex.has(e.blockIndex)) {
+        destroyedFirstByIndex.set(e.blockIndex, { tick: e.tick, order: e.order })
+      }
+    }
+    destroyed = [...destroyedFirstByIndex].flatMap(([idx, when]) => {
+      const ref = indexInMesh.get(idx)
+      const blk = blocks[idx]
+      if (!ref || !blk) return []
+      return [{ ref, pos: toWorld(blk.x, blk.y, blk.z), quat: ref.quat, tick: when.tick, order: when.order }]
+    })
+
     // Observer on/off intervals: pair each blockIndex's own alternating observerFired/observerOff
-    // ticks by array position (events is already sorted by (tick, order), and a single observer's
-    // own fire/off stream strictly alternates, so onTicks[i]/offTicks[i] is a safe pairing). A fire
-    // with no matching off yet (log ends mid-pulse) stays lit through the rest of playback instead
-    // of never lighting or throwing.
-    const onTicksByIndex = new Map<number, number[]>()
-    const offTicksByIndex = new Map<number, number[]>()
+    // edges by array position (events is already sorted by (tick, order), and a single observer's
+    // own fire/off stream strictly alternates, so onEdges[i]/offEdges[i] is a safe pairing). Keeps
+    // each edge's (tick, order) pair, not just the tick - see isObserverActiveAtEvent. A fire with
+    // no matching off yet (log ends mid-pulse) stays lit through the rest of playback instead of
+    // never lighting or throwing (offTick = terminationTick+1, offOrder irrelevant at that point).
+    const onEdgesByIndex = new Map<number, { tick: number; order: number }[]>()
+    const offEdgesByIndex = new Map<number, { tick: number; order: number }[]>()
     for (const e of events) {
       if (e.kind === 'pistonBlocked') {
         const arr = blockedTicksByIndex.get(e.blockIndex) ?? []
@@ -494,20 +645,54 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
         arr.push(e.tick)
         droppedTicksByIndex.set(e.blockIndex, arr)
       } else if (e.kind === 'observerFired') {
-        const arr = onTicksByIndex.get(e.blockIndex) ?? []
-        arr.push(e.tick)
-        onTicksByIndex.set(e.blockIndex, arr)
+        const arr = onEdgesByIndex.get(e.blockIndex) ?? []
+        arr.push({ tick: e.tick, order: e.order })
+        onEdgesByIndex.set(e.blockIndex, arr)
       } else if (e.kind === 'observerOff') {
-        const arr = offTicksByIndex.get(e.blockIndex) ?? []
-        arr.push(e.tick)
-        offTicksByIndex.set(e.blockIndex, arr)
+        const arr = offEdgesByIndex.get(e.blockIndex) ?? []
+        arr.push({ tick: e.tick, order: e.order })
+        offEdgesByIndex.set(e.blockIndex, arr)
       }
     }
-    for (const [blockIndex, onTicks] of onTicksByIndex) {
-      const offTicks = offTicksByIndex.get(blockIndex) ?? []
-      const intervals = onTicks.map((on, i) => ({ on, off: offTicks[i] ?? terminationTick + 1 }))
+    for (const [blockIndex, onEdges] of onEdgesByIndex) {
+      const offEdges = offEdgesByIndex.get(blockIndex) ?? []
+      const intervals = onEdges.map((on, i) => {
+        const off = offEdges[i] ?? { tick: terminationTick + 1, order: 0 }
+        return { onTick: on.tick, onOrder: on.order, offTick: off.tick, offOrder: off.order }
+      })
       observerIntervalsByIndex.set(blockIndex, intervals)
     }
+
+    // Powered on/off intervals: unlike the observer pairing above, machine.powered already carries
+    // its own ordered on/off timeline including the real t=0 state (steps[0].tick is always 0), so
+    // intervals are built by walking each block's own steps directly instead of re-deriving them
+    // from the flat events list - this also means a block already on/open/lit at load correctly
+    // shows lit from the start, not just from its first later transition.
+    for (const p of machine.powered ?? []) {
+      const intervals: { onTick: number; onOrder: number; offTick: number; offOrder: number }[] = []
+      let onStep: PoweredStep | null = null
+      for (const step of p.steps) {
+        if (step.on && !onStep) {
+          onStep = step
+        } else if (!step.on && onStep) {
+          intervals.push({ onTick: onStep.tick, onOrder: onStep.order, offTick: step.tick, offOrder: step.order })
+          onStep = null
+        }
+      }
+      if (onStep) intervals.push({ onTick: onStep.tick, onOrder: onStep.order, offTick: terminationTick + 1, offOrder: 0 })
+      poweredIntervalsByIndex.set(p.blockIndex, intervals)
+    }
+    // machine.powered only ever lists a block that changed at least once (see
+    // stream_to_visualizer.py) - a togglable block that starts on/open and simply never changes
+    // for the whole run has no entry there at all, so it'd otherwise never show its alt look.
+    // Fill those in directly from the block's own decoded meta.
+    blocks.forEach((blk, i) => {
+      if (poweredIntervalsByIndex.has(i)) return
+      const d = decodeState(blk.state)
+      if (toggleAltKeyFor(d.blockId, d.meta) === null) return
+      const initialOn = d.blockId === BLOCK_LIT_REDSTONE_LAMP || (d.meta & 0b110) !== 0
+      poweredIntervalsByIndex.set(i, initialOn ? [{ onTick: 0, onOrder: -1, offTick: Infinity, offOrder: 0 }] : [])
+    })
 
     eventIndex = -1
     mode = 'auto'
@@ -707,6 +892,8 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     if (mode === 'auto') stepAuto()
     else stepManual()
     updateEffectOverlays()
+    updateToggleVisuals()
+    updateDestroyed() // after updateToggleVisuals - a destroyed block's base must win over its toggle state
     renderer.render(scene, camera)
   }
 

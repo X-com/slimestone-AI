@@ -8,6 +8,7 @@
 // translucent; everything else is opaque.
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import type { Facing } from './blocks'
 
 const TEX_NAMES = [
   'stone', 'glass', 'slime', 'redstone_block',
@@ -50,6 +51,17 @@ const TEX_NAMES = [
   // The piston body's own front face while extended (the head has left, exposing the plain
   // track/frame) - see the piston-inner overlay in animatedScene.ts.
   'piston_inner',
+  // Rails - excluded by the generator that produced the block above (their real Minecraft
+  // boundingBox is "empty" - no collision - which the generator's air/water/lava filter also
+  // caught by mistake). Picked back out and added by hand; one representative texture per rail
+  // type (ignores the powered/unpowered and curve-shape texture variants - same "one
+  // representative" simplification already used elsewhere in this file, e.g. glazed terracotta).
+  'rail_normal', 'rail_golden', 'rail_detector', 'rail_activator',
+  // Powered look for the two rail types whose on/off is actually logged (BlockPoweredChanged) -
+  // see POWERABLE_RAIL_IDS/toggleAltKeyFor. Detector rail's own "_powered" file exists too but
+  // isn't wired up: its powered bit tracks cart weight, not a redstone update this simulator emits
+  // an on/off event for, so there is no timeline to animate it against.
+  'rail_golden_powered', 'rail_activator_powered',
 ] as const
 type TexName = (typeof TEX_NAMES)[number]
 
@@ -67,8 +79,11 @@ const FACES: Record<number, [TexName, TexName, TexName, TexName, TexName, TexNam
   33: ['piston_side', 'piston_side', 'piston_top', 'piston_bottom', 'piston_side', 'piston_side'],
   29: ['piston_side_sticky', 'piston_side_sticky', 'piston_top_sticky', 'piston_bottom_sticky', 'piston_side_sticky', 'piston_side_sticky'],
   34: ['piston_side', 'piston_side', 'piston_top', 'piston_side', 'piston_side', 'piston_side'],
-  // observer: front (eyes) on +Z, back (output) on -Z, arrow textures on the other four
-  218: ['observer_side', 'observer_side', 'observer_top', 'observer_top', 'observer_front', 'observer_back'],
+  // observer: output/arrow on +Z (the facingVec-aligned face - see observerQuaternion), eyes on
+  // -Z. Swapped from the front=+Z/back=-Z layout used earlier: that had the arrow pointing at
+  // -facingVec (opposite of where the observer's own facing meta points), which read backwards -
+  // the arrow needs to point toward facingVec, the direction power is actually supplied to.
+  218: ['observer_side', 'observer_side', 'observer_top', 'observer_top', 'observer_back', 'observer_front'],
 
   // Every other real Minecraft 1.12 block with a texture, generated (not hand-typed) from the
   // real block registry cross-referenced against public/textures/ - see the TEX_NAMES comment
@@ -265,6 +280,14 @@ const FACES: Record<number, [TexName, TexName, TexName, TexName, TexName, TexNam
   251: ['concrete_white','concrete_white','concrete_white','concrete_white','concrete_white','concrete_white'],
   252: ['concrete_powder_white','concrete_powder_white','concrete_powder_white','concrete_powder_white','concrete_powder_white','concrete_powder_white'],
   255: ['structure_block','structure_block','structure_block','structure_block','structure_block','structure_block'],
+
+  // Rails - added by hand (see the TEX_NAMES comment above for why the generator missed them).
+  // One representative texture, repeated on all 6 faces - RAIL_IDS below overrides the geometry
+  // to a thin plate, so only the top face is ever actually visible.
+  27: ['rail_golden','rail_golden','rail_golden','rail_golden','rail_golden','rail_golden'],
+  28: ['rail_detector','rail_detector','rail_detector','rail_detector','rail_detector','rail_detector'],
+  66: ['rail_normal','rail_normal','rail_normal','rail_normal','rail_normal','rail_normal'],
+  157: ['rail_activator','rail_activator','rail_activator','rail_activator','rail_activator','rail_activator'],
 }
 
 // Which world axis a block's "front" points to before per-instance facing rotation.
@@ -276,10 +299,127 @@ export function frontAxis(blockId: number): THREE.Vector3 | null {
   return null // non-directional: no rotation
 }
 
+// Observer (218): exact rotations from vanilla's own blockstates/observer.json (matches
+// piston.json's convention too - the front/back texture assignment on FACES[218] already mirrors
+// observer.json's default, unrotated (facing=north) face layout: north=front, south=back/arrow,
+// up=down=top, east=west=side). A generic setFromUnitVectors(AXIS_Z, facingVec) gets front/back
+// right for every facing (they sit exactly on the rotation axis by construction), but for down/up
+// it's free to pick either of two 90-degree tilts around a perpendicular axis with no way to know
+// vanilla's actual choice - which swaps which side ends up showing observer_top vs observer_side,
+// and (for every facing) can roll the front/back faces' texture in-plane. These exact per-facing
+// rotations remove that ambiguity entirely instead of leaving it to whichever axis the cross
+// product happens to pick.
+const OBSERVER_QUATS: Record<Facing, THREE.Quaternion> = {
+  north: new THREE.Quaternion(),
+  south: new THREE.Quaternion().setFromAxisAngle(AXIS_Y, Math.PI),
+  west: new THREE.Quaternion().setFromAxisAngle(AXIS_Y, -Math.PI / 2),
+  east: new THREE.Quaternion().setFromAxisAngle(AXIS_Y, Math.PI / 2),
+  down: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2),
+  up: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2),
+}
+export function observerQuaternion(facing: Facing): THREE.Quaternion {
+  return OBSERVER_QUATS[facing]
+}
+
 const CUTOUT = new Set([20, 95, 102, 160]) // glass + stained_glass/glass_pane/stained_glass_pane (reuse glass's texture)
 const TRANSLUCENT = new Set([165]) // slime: semi-transparent
 
-const N = 15 // atlas grid (15x15 = 225 cells, 211 used)
+// Fence gate ids need a different geometry for open vs closed - real Minecraft's fence-gate meta
+// packs facing (bits 0-1) + open (bit 2) + powered (bit 3), a completely different layout from the
+// down/up/n/s/w/e facing scheme decodeState()/FACING_VECTORS use for pistons/observers, so it's
+// read directly here rather than reusing decodeState(). Callers must route id lookups for these
+// blocks through renderKeyFor() instead of using the raw block id, since the two states are baked
+// as separate geometries under a synthetic offset key (see loadBlockAssets).
+const FENCE_GATE_IDS = new Set([107, 183, 184, 185, 186, 187])
+const FENCE_GATE_OPEN_OFFSET = 1000
+export function isFenceGate(blockId: number): boolean {
+  return FENCE_GATE_IDS.has(blockId)
+}
+export function renderKeyFor(blockId: number, meta: number): number {
+  if (FENCE_GATE_IDS.has(blockId) && (meta & 0b100) !== 0) return blockId + FENCE_GATE_OPEN_OFFSET
+  if (RAIL_IDS.has(blockId)) {
+    const shape = meta & 0xf
+    if (RAIL_ASCEND_SHAPES.has(shape)) return blockId + RAIL_ASCEND_OFFSET + shape
+  }
+  return blockId
+}
+
+// Trapdoor ids - real Minecraft's open state pivots the panel 90 degrees to stand flush against
+// one side instead of lying flat; approximated the same way as fence gate's open state (a
+// distinct baked geometry, not pixel-perfect against every hinge/facing combination).
+const TRAPDOOR_IDS = new Set([96, 167])
+const TRAPDOOR_OPEN_OFFSET = 4000
+// Rails whose powered bit actually gets logged (BlockPoweredChanged) - detector rail's "powered"
+// bit is driven by cart weight, not this simulator's redstone update path, and plain rail is never
+// powered at all, so neither has an on-timeline to animate against (see stream_to_visualizer.py).
+const POWERABLE_RAIL_IDS = new Set([27, 157])
+const RAIL_POWERED_OFFSET = 3000
+const BLOCK_REDSTONE_LAMP = 123
+export const BLOCK_LIT_REDSTONE_LAMP = 124
+
+// animatedScene.ts renders every togglable block as TWO permanent instances (its "off" look and
+// its "on" look, both always present at the same spot) and toggles which one is scaled to 1 each
+// frame from the real on/off timeline - instead of picking a single geometry once at load time the
+// way renderKeyFor()/the static multi-machine scene.ts do. toggleBaseKeyFor is always the "off"
+// look regardless of this block's own actual meta (even if it starts on/open); toggleAltKeyFor is
+// the "on" look, or null for a block with no modeled alternate (plain/detector rail, everything
+// else) - those just keep using renderKeyFor's single-geometry behavior via toggleBaseKeyFor's
+// fallback.
+export function toggleBaseKeyFor(blockId: number, meta: number): number {
+  if (blockId === BLOCK_REDSTONE_LAMP || blockId === BLOCK_LIT_REDSTONE_LAMP) return BLOCK_REDSTONE_LAMP
+  if (FENCE_GATE_IDS.has(blockId) || TRAPDOOR_IDS.has(blockId)) return blockId
+  if (POWERABLE_RAIL_IDS.has(blockId)) {
+    const shape = meta & 0xf
+    return RAIL_ASCEND_SHAPES.has(shape) ? blockId + RAIL_ASCEND_OFFSET + shape : blockId
+  }
+  return renderKeyFor(blockId, meta)
+}
+export function toggleAltKeyFor(blockId: number, meta: number): number | null {
+  if (blockId === BLOCK_REDSTONE_LAMP || blockId === BLOCK_LIT_REDSTONE_LAMP) return BLOCK_LIT_REDSTONE_LAMP
+  if (FENCE_GATE_IDS.has(blockId)) return blockId + FENCE_GATE_OPEN_OFFSET
+  if (TRAPDOOR_IDS.has(blockId)) return blockId + TRAPDOOR_OPEN_OFFSET
+  if (POWERABLE_RAIL_IDS.has(blockId)) {
+    const shape = meta & 0xf
+    return RAIL_ASCEND_SHAPES.has(shape) ? blockId + RAIL_POWERED_OFFSET + RAIL_ASCEND_OFFSET + shape : blockId + RAIL_POWERED_OFFSET
+  }
+  return null
+}
+
+// Rails pack their shape directly as the raw meta value (BlockRailBase.EnumRailDirection ordinals
+// - see cpp simulator/src/block_registry.h's RAIL_SHAPE_* constants), not the down/up/n/s/w/e
+// facing scheme decodeState()/FACING_VECTORS use for pistons/observers - a third distinct meta
+// layout, so it's read directly here too.
+const RAIL_IDS = new Set([27, 28, 66, 157])
+export function isRail(blockId: number): boolean {
+  return RAIL_IDS.has(blockId)
+}
+const RAIL_QUAT_IDENTITY = new THREE.Quaternion()
+const RAIL_QUAT_EW = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2)
+// shape 0 (north-south) is the baseline/untilted orientation - the flat plate's default UV/texture
+// orientation is assumed to already read as north-south, matching vanilla's meta=0. Ascending
+// shapes (2-5) get their own pre-tilted geometry instead of a per-instance rotation (see
+// RAIL_ASCEND_OFFSET below) so they render identity here - rotating the flat plate around the
+// block's center at render time swung one end deep into the block below and left the other short
+// of the block above, instead of the low end sitting level with an adjoining flat rail. Curve
+// shapes (6-9, plain rail only) aren't modeled - they fall back to the straight NS look.
+const RAIL_QUATS: Record<number, THREE.Quaternion> = {
+  0: RAIL_QUAT_IDENTITY,
+  1: RAIL_QUAT_EW,
+}
+export function railQuaternion(meta: number): THREE.Quaternion {
+  return RAIL_QUATS[meta & 0xf] ?? RAIL_QUAT_IDENTITY
+}
+// Small gap between a rail's underside and the block below - without it the two faces are exactly
+// coincident and z-fight. Shared by the flat plate and the ascending slab below.
+const RAIL_ELEV = 1 / 32
+// Ascending rail shapes (RAIL_SHAPE_ASCENDING_* in cpp simulator/src/block_registry.h) get a
+// dedicated pre-tilted geometry per direction instead of railQuaternion() rotating the flat plate
+// at render time - see loadBlockAssets. Keyed the same way fence gates key their open/closed
+// geometry (renderKeyFor()): a synthetic id, since one raw block id needs more than one geometry.
+export const RAIL_ASCEND_OFFSET = 2000
+const RAIL_ASCEND_SHAPES = new Set([2, 3, 4, 5]) // ASCENDING_EAST/WEST/NORTH/SOUTH
+
+const N = 15 // atlas grid (15x15 = 225 cells, all used)
 const CELL = 16
 
 export interface BlockAssets {
@@ -345,15 +485,35 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
     faces: readonly TexName[],
     size: readonly [number, number, number] = [1, 1, 1],
     offset: readonly [number, number, number] = [0, 0, 0],
+    // Rotates each face's texture 90 degrees within its own atlas cell - needed when a shape's
+    // long axis doesn't match the texture's own baked-in orientation (e.g. an east/west-elongated
+    // ascending rail slab using the same image as the north/south one - see bakeRailSlope).
+    rotateUV = false,
+    // Per-face-index U or V flip - BoxGeometry's own default UV mapping is mirrored between
+    // opposite faces (+x vs -x, +y vs -y), which vanilla's own block models routinely correct for
+    // one face of the pair (see observer.json: east flips U vs west, up flips V vs down) so a
+    // texture with any asymmetric detail doesn't look wrong on exactly one of the two. Keyed by
+    // BoxGeometry face index (0=+x,1=-x,2=+y,3=-y,4=+z,5=-z).
+    flipFaces?: Partial<Record<number, 'u' | 'v'>>,
   ): THREE.BufferGeometry {
     const geo = new THREE.BoxGeometry(...size)
     const uv = geo.attributes.uv as THREE.BufferAttribute
     for (let f = 0; f < 6; f++) {
       const { col, row } = cellOf(faces[f])
+      const flip = flipFaces?.[f]
       for (let k = 0; k < 4; k++) {
         const idx = f * 4 + k
-        const fu = PAD + uv.getX(idx) * (1 - 2 * PAD)
-        const fv = PAD + uv.getY(idx) * (1 - 2 * PAD)
+        let u = uv.getX(idx)
+        let v = uv.getY(idx)
+        if (rotateUV) {
+          const nu = v
+          v = 1 - u
+          u = nu
+        }
+        if (flip === 'u') u = 1 - u
+        if (flip === 'v') v = 1 - v
+        const fu = PAD + u * (1 - 2 * PAD)
+        const fv = PAD + v * (1 - 2 * PAD)
         uv.setXY(idx, (col + fu) / N, (N - 1 - row + fv) / N)
       }
     }
@@ -366,36 +526,125 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
   for (const id of Object.keys(FACES)) geos.set(Number(id), bake(FACES[Number(id)]))
   const fallbackGeo = bake(FACES[1]) // unknown ids render as stone
 
+  // Observer override: BoxGeometry's default UV is mirrored between +x/-x and between +y/-y (see
+  // bake()'s flipFaces doc) - vanilla's own observer.json corrects exactly the east face (U-flip,
+  // face index 0) and the up face (V-flip, face index 2) to compensate, leaving west/down as the
+  // unflipped baseline. Without this, observer_side/observer_top look wrong on those 2 faces in
+  // every orientation - it's baked into the untransformed geometry, not something any per-facing
+  // rotation could fix.
+  if (FACES[218]) geos.set(218, bake(FACES[218], [1, 1, 1], [0, 0, 0], false, { 0: 'u', 2: 'v' }))
+
   // Non-cube blocks: still one geometry per id (shared across all instances, like every other
   // block), just squashed/offset instead of a full unit cube - a shape approximation (real
   // rotation-dependent placement like an open trapdoor or a curved rail isn't modeled), but reads
   // as the right kind of thing instead of a solid block.
-  const RAIL_IDS = [27, 28, 66, 157] // golden/detector/rail/activator - thin plate on the floor
+  // golden/detector/rail/activator - thin plate on the floor (RAIL_IDS declared at module scope,
+  // shared with railQuaternion/isRail's orientation logic below)
   for (const id of RAIL_IDS) {
-    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 1 / 16, 1], [0, -0.5 + 1 / 32, 0]))
+    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 1 / 16, 1], [0, -0.5 + 1 / 32 + RAIL_ELEV, 0]))
   }
-  const TRAPDOOR_IDS = [96, 167] // closed, bottom-attached (the common case) - thin panel on the floor
+  // Ascending rail slabs: built long-axis-first and centered at the origin, then tilted 45 degrees
+  // around their OWN center (not the block's) so the low end lands level with an adjoining flat
+  // rail and the high end reaches the block above - a per-instance rotation of the flat plate
+  // instead swings around the block's center, sinking the low end into the block below. Angles
+  // match the directions the old per-instance RAIL_QUAT_ASCEND_* used, just baked into the
+  // geometry now instead of applied at render time.
+  const RAIL_SLOPE = Math.SQRT2
+  // East/west slopes are elongated along X instead of Z, but reuse the exact same texture image
+  // as the north/south (Z-elongated) one - without rotateUV the ties end up running along the
+  // slope instead of across it, reading as "rotated 90 degrees". North/south needs no such
+  // correction: it's built on the same axis the flat plate's own baseline orientation already
+  // assumes ties run.
+  function bakeRailSlope(faces: readonly TexName[], size: readonly [number, number, number], axis: 'x' | 'z', angle: number): THREE.BufferGeometry {
+    const geo = bake(faces, size, [0, 0, 0], axis === 'z')
+    if (axis === 'x') geo.rotateX(angle)
+    else geo.rotateZ(angle)
+    geo.translate(0, RAIL_ELEV, 0)
+    return geo
+  }
+  for (const id of RAIL_IDS) {
+    if (!FACES[id]) continue
+    const faces = FACES[id]
+    geos.set(id + RAIL_ASCEND_OFFSET + 2, bakeRailSlope(faces, [RAIL_SLOPE, 1 / 16, 1], 'z', Math.PI / 4)) // ASCENDING_EAST
+    geos.set(id + RAIL_ASCEND_OFFSET + 3, bakeRailSlope(faces, [RAIL_SLOPE, 1 / 16, 1], 'z', -Math.PI / 4)) // ASCENDING_WEST
+    geos.set(id + RAIL_ASCEND_OFFSET + 4, bakeRailSlope(faces, [1, 1 / 16, RAIL_SLOPE], 'x', -Math.PI / 4)) // ASCENDING_NORTH
+    geos.set(id + RAIL_ASCEND_OFFSET + 5, bakeRailSlope(faces, [1, 1 / 16, RAIL_SLOPE], 'x', Math.PI / 4)) // ASCENDING_SOUTH
+  }
+  // Powered look: same shapes as above (flat + the 4 ascending slabs), just re-baked with the
+  // "_powered" texture instead - see POWERABLE_RAIL_IDS/toggleAltKeyFor.
+  const POWERED_FACES: Partial<Record<number, readonly TexName[]>> = {
+    27: ['rail_golden_powered', 'rail_golden_powered', 'rail_golden_powered', 'rail_golden_powered', 'rail_golden_powered', 'rail_golden_powered'],
+    157: ['rail_activator_powered', 'rail_activator_powered', 'rail_activator_powered', 'rail_activator_powered', 'rail_activator_powered', 'rail_activator_powered'],
+  }
+  for (const id of POWERABLE_RAIL_IDS) {
+    const faces = POWERED_FACES[id]
+    if (!faces) continue
+    geos.set(id + RAIL_POWERED_OFFSET, bake(faces, [1, 1 / 16, 1], [0, -0.5 + 1 / 32 + RAIL_ELEV, 0]))
+    geos.set(id + RAIL_POWERED_OFFSET + RAIL_ASCEND_OFFSET + 2, bakeRailSlope(faces, [RAIL_SLOPE, 1 / 16, 1], 'z', Math.PI / 4))
+    geos.set(id + RAIL_POWERED_OFFSET + RAIL_ASCEND_OFFSET + 3, bakeRailSlope(faces, [RAIL_SLOPE, 1 / 16, 1], 'z', -Math.PI / 4))
+    geos.set(id + RAIL_POWERED_OFFSET + RAIL_ASCEND_OFFSET + 4, bakeRailSlope(faces, [1, 1 / 16, RAIL_SLOPE], 'x', -Math.PI / 4))
+    geos.set(id + RAIL_POWERED_OFFSET + RAIL_ASCEND_OFFSET + 5, bakeRailSlope(faces, [1, 1 / 16, RAIL_SLOPE], 'x', Math.PI / 4))
+  }
+  // Trapdoor: closed = thin panel on the floor (bottom-attached, the common case). Open =
+  // approximated as the same panel standing upright flush against one side (real Minecraft's exact
+  // hinge/facing isn't modeled - same simplification already used for fence gate's open state).
   for (const id of TRAPDOOR_IDS) {
-    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 3 / 16, 1], [0, -0.5 + 3 / 32, 0]))
+    if (!FACES[id]) continue
+    geos.set(id, bake(FACES[id], [1, 3 / 16, 1], [0, -0.5 + 3 / 32, 0]))
+    geos.set(id + TRAPDOOR_OPEN_OFFSET, bake(FACES[id], [1, 1, 3 / 16], [0, 0, 0.5 - 3 / 32]))
   }
-  const FENCE_GATE_IDS = [107, 183, 184, 185, 186, 187] // closed - a thin post/bar slab, not a solid block
+  // Fence gate: two end posts (the hinges - fixed in place, never move) + two horizontal bars
+  // between them (closed), merged into one geometry - reads as an actual gate instead of a solid
+  // board. Open state: rather than the whole gate rotating 90 degrees in place (reads as the
+  // block just spinning, not opening), each bar is split at the middle into its own half attached
+  // to its post, and only the two half-bars swing 90 degrees - like saloon doors opening outward
+  // from the center, posts staying exactly where they are. Stored under a synthetic
+  // `id + FENCE_GATE_OPEN_OFFSET` key since it's a different geometry for the same block id - see
+  // toggleAltKeyFor(), which callers must use instead of the raw block id.
+  const GATE_POST_X = 0.5 - 3 / 32 // post center x - the hinge each half-bar swings around
+  const GATE_HALF_BAR_LEN = (1 - 6 / 16) / 2 // half of the original full-width bar
   for (const id of FENCE_GATE_IDS) {
-    if (FACES[id]) geos.set(id, bake(FACES[id], [1, 1, 3 / 16], [0, 0, 0]))
+    if (!FACES[id]) continue
+    const faces = FACES[id]
+    const post = (ox: number) => bake(faces, [3 / 16, 1, 3 / 16], [ox, 0, 0])
+    const closedBar = (ox: number, oy: number) => bake(faces, [GATE_HALF_BAR_LEN, 3 / 16, 3 / 16], [ox, oy, 0])
+    const openBar = (ox: number, oy: number, oz: number) => bake(faces, [3 / 16, 3 / 16, GATE_HALF_BAR_LEN], [ox, oy, oz])
+    geos.set(id, mergeGeometries([
+      post(GATE_POST_X), post(-GATE_POST_X),
+      closedBar(-GATE_HALF_BAR_LEN / 2, 0.1875), closedBar(-GATE_HALF_BAR_LEN / 2, -0.125),
+      closedBar(GATE_HALF_BAR_LEN / 2, 0.1875), closedBar(GATE_HALF_BAR_LEN / 2, -0.125),
+    ]))
+    geos.set(
+      id + FENCE_GATE_OPEN_OFFSET,
+      mergeGeometries([
+        post(GATE_POST_X), post(-GATE_POST_X),
+        openBar(-GATE_POST_X, 0.1875, -GATE_HALF_BAR_LEN / 2), openBar(-GATE_POST_X, -0.125, -GATE_HALF_BAR_LEN / 2),
+        openBar(GATE_POST_X, 0.1875, GATE_HALF_BAR_LEN / 2), openBar(GATE_POST_X, -0.125, GATE_HALF_BAR_LEN / 2),
+      ]),
+    )
   }
 
   // Piston head: a thin cap (the visible face) plus a narrower rod reaching back toward the body -
   // two boxes merged into one geometry, each baked/UV-mapped the same way as any other block.
+  // Built along +Y (local "front" = top), matching frontAxis(34) === AXIS_Y - the scene rotates
+  // +Y to the block's real facing, so the cap must sit on +Y here, not +Z (a +Z build would face
+  // sideways for every piston not already pointing north/south).
   geos.set(
     34,
     mergeGeometries([
-      bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_top', 'piston_side'], [1, 1, 4 / 16], [0, 0, 0.5 - 2 / 16]),
-      bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side'], [4 / 16, 4 / 16, 12 / 16], [0, 0, -0.125]),
+      bake(['piston_side', 'piston_side', 'piston_top', 'piston_side', 'piston_side', 'piston_side'], [1, 4 / 16, 1], [0, 0.5 - 2 / 16, 0]),
+      bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side'], [4 / 16, 12 / 16, 4 / 16], [0, -0.125, 0]),
     ]),
   )
 
-  // Observer "on" box - same face layout as FACES[218] (side/side/top/top/front/back) but using
-  // the DABB-powered variant of every face, baked with the same helper as any other block.
-  const observerOnGeo = bake(['observer_side_on', 'observer_side_on', 'observer_top_on', 'observer_top_on', 'observer_front_on', 'observer_back_on'])
+  // Observer "on" box - same face layout as FACES[218] (side/side/top/top/back/front, arrow
+  // toward facingVec) but using the DABB-powered variant of every face, baked with the same
+  // helper as any other block - same east/up UV-flip correction as the base observer geometry
+  // above, for the same reason.
+  const observerOnGeo = bake(
+    ['observer_side_on', 'observer_side_on', 'observer_top_on', 'observer_top_on', 'observer_back_on', 'observer_front_on'],
+    [1, 1, 1], [0, 0, 0], false, { 0: 'u', 2: 'v' },
+  )
   const observerOnMat = new THREE.MeshLambertMaterial({
     map: atlas,
     polygonOffset: true, // wins the z-fight against the real (identically-sized/positioned) observer underneath
@@ -403,9 +652,11 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
     polygonOffsetUnits: -4,
   })
 
+  // +Y (not +Z) for the same reason as the piston head above - piston_top/piston_inner is always
+  // the +Y face for these ids (see FACES[33]/[29]), matching frontAxis(33|29) === AXIS_Y.
   const pistonInnerGeos = new Map<number, THREE.BufferGeometry>([
-    [33, bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_inner', 'piston_side'])],
-    [29, bake(['piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky', 'piston_inner', 'piston_side_sticky'])],
+    [33, bake(['piston_side', 'piston_side', 'piston_inner', 'piston_side', 'piston_side', 'piston_side'])],
+    [29, bake(['piston_side_sticky', 'piston_side_sticky', 'piston_inner', 'piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky'])],
   ])
   const pistonInnerMat = new THREE.MeshLambertMaterial({
     map: atlas,

@@ -62,6 +62,19 @@ export interface BlockExtension {
   steps: ExtensionStep[]
 }
 
+// A rail (golden/activator)/fence gate/trapdoor/redstone lamp's own on-off timeline (powered/open/
+// lit) - same shape as BlockExtension, starting from its true t=0 state (steps[0].tick is always
+// 0) so an already-on block at load shows correctly instead of only lighting on the first event.
+export interface PoweredStep {
+  tick: number
+  order: number
+  on: boolean
+}
+export interface BlockPowered {
+  blockIndex: number // index into candidate.blocks
+  steps: PoweredStep[]
+}
+
 // One real logged event, in true recorded (tick, order) order - the itemized log the /generator
 // page's tick/subtick stepper walks through to verify event ordering. `blockPushed`/`pistonExtend`/
 // `pistonRetract` are redundant with moves/extensions (same keyframes, just flattened into one
@@ -77,6 +90,9 @@ export type MachineEventKind =
   | 'observerFired'
   | 'observerOff'
   | 'scheduledTickDropped'
+  | 'poweredOn'
+  | 'poweredOff'
+  | 'blockDestroyed'
 export interface MachineEvent {
   tick: number
   order: number
@@ -99,6 +115,7 @@ export interface Machine {
   // animatedScene.ts.
   moves?: BlockMove[]
   extensions?: BlockExtension[]
+  powered?: BlockPowered[]
   events?: MachineEvent[]
   terminationTick?: number
 }
@@ -207,6 +224,7 @@ interface GeneratorRecord {
   blocks: Block[]
   moves: BlockMove[]
   extensions: BlockExtension[]
+  powered: BlockPowered[]
   events: MachineEvent[]
   terminationTick: number
 }
@@ -228,6 +246,7 @@ export function parseGeneratorRecords(frame: string): Machine[] {
       found_at: '',
       moves: r.moves,
       extensions: r.extensions,
+      powered: r.powered,
       events: r.events,
       terminationTick: r.terminationTick,
     }))

@@ -32,7 +32,8 @@ enum SimEventKind : std::uint8_t {
     PistonExtendBlocked = 9,       // piston (subject) wanted to extend but could not (see failureReason)
     PistonRetractBlocked = 10,     // piston (subject) wanted to retract but could not
     BlockLeftBehind = 11,          // sticky pull failed / block detached from its group (reserved, not yet emitted)
-    BlockDestroyed = 12,           // block pushed into a destroying condition (reserved, not yet emitted)
+    BlockDestroyed = 12,           // block (subject) removed from the world outside of a piston push -
+                                    // e.g. a rail losing its supporting block (railNeighborChanged)
     ComponentSplit = 13,           // a connected group tore apart (reserved, not yet emitted)
     ObserverSuppressed = 14,       // observer fired but had no effect (reserved, not yet emitted)
     // piston (subject) was notified because SOME neighboring block changed (the generic mechanism
@@ -48,6 +49,11 @@ enum SimEventKind : std::uint8_t {
     // own doc), this event exists purely so that drop is now visible in the trace. blockKey/actorKey
     // = stableKey(pos) (whoever currently occupies pos); reserved0 = the blockIdValue attempted.
     ScheduledTickDropped = 16,
+    // SDL6 addition: a rail (golden/activator only), fence gate, trapdoor, or redstone lamp
+    // (subject) flipped its own powered/open/lit bit. reserved0 = the raw block id (so a reader
+    // can tell which of the four it is without a second lookup); flags bit SEF_POWERED_ON = new
+    // state (set = now on/open/lit, clear = now off/closed/unlit).
+    BlockPoweredChanged = 17,
 };
 
 // SimEvent.failureReason (0 = success/none). Populated on the *Blocked and PistonMoveExecuted(blocked)
@@ -71,6 +77,7 @@ constexpr std::uint8_t SEF_OBSERVER_ON   = 1 << 5; // ObserverFired/ObserverActi
                                                     // pulse, clear = the OFF transition 2 ticks later
                                                     // (same function, re-invoked via the scheduled
                                                     // tick it queued itself).
+constexpr std::uint8_t SEF_POWERED_ON    = 1 << 6; // BlockPoweredChanged: set = now on/open/lit
 
 // ObserverFired cause, stored in flags bits 2-3.
 constexpr std::uint8_t SEC_SCHEDULED       = 0; // generic scheduled pulse
@@ -235,10 +242,11 @@ struct RunSummary {
 // on/off flag bit + ScheduledTickDropped kind - no new fields this time (byte size unchanged), but
 // the magic still moves since the *meaning* of existing bytes (flags) changed underfoot: an old
 // SDL4 reader would otherwise silently misinterpret bit 5 as always-zero/OFF for every historical
-// ObserverFired record.
+// ObserverFired record. Bumped SDL5->SDL6 for the new BlockPoweredChanged kind + SEF_POWERED_ON
+// flag bit (rails/fence gates/trapdoors/lamps turning on/off) - again no new fields, same reasoning.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '5'};
-    std::uint32_t formatVersion = 5;
+    char          magic[4] = {'S', 'D', 'L', '6'};
+    std::uint32_t formatVersion = 6;
     std::uint64_t simulatorBuildHash = 0;
     std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;

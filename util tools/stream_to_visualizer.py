@@ -62,15 +62,22 @@ from websockets.asyncio.server import serve  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402
 
 _BLOCK_PUSHED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockPushed")
+_PISTON_QUEUED_KIND = next(k for k, name in KIND_NAMES.items() if name == "PistonQueued")
 _PISTON_MOVE_KIND = next(k for k, name in KIND_NAMES.items() if name == "PistonMoveExecuted")
 _OBSERVER_FIRED_KIND = next(k for k, name in KIND_NAMES.items() if name == "ObserverFired")
 _SCHEDULED_DROP_KIND = next(k for k, name in KIND_NAMES.items() if name == "ScheduledTickDropped")
+_POWERED_CHANGED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockPoweredChanged")
+_BLOCK_DESTROYED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockDestroyed")
 _PISTON_IDS = {BLOCK_PISTON, BLOCK_STICKY_PISTON}
-# sim_event_log.h's SEF_EXTEND/SEF_SUCCESS/SEF_OBSERVER_ON flag bits (not re-exported by
-# transformer_gym.simlog_reader - only verify_simulation_data.py defines them).
+# sim_event_log.h's SEF_EXTEND/SEF_SUCCESS/SEF_OBSERVER_ON/SEF_POWERED_ON flag bits (not
+# re-exported by transformer_gym.simlog_reader - only verify_simulation_data.py defines them).
 _SEF_EXTEND = 1 << 0
 _SEF_SUCCESS = 1 << 1
 _SEF_OBSERVER_ON = 1 << 5
+_SEF_POWERED_ON = 1 << 6
+# BlockPoweredChanged's subject block ID swaps on a lamp turning on/off (123 <-> 124), unlike a
+# rail/fence-gate/trapdoor's own state - not re-exported by genetic_ml.blocks, so named here too.
+_BLOCK_LIT_REDSTONE_LAMP = 124
 
 # Numbered so GENERATOR_INDEX below can select one by a plain int, per the user's request.
 # Order/names match generator/tests/test_generators.py's GENERATORS tuple (perturb/forward/puzzle/
@@ -171,6 +178,22 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
         entry = entry_by_key.get(s.stableKey)
         if entry is not None:
             for ev in iter_block_events(data, entry):
+                if ev.kind == _PISTON_QUEUED_KIND:
+                    # A non-sticky piston's retract never goes through doPistonMove (see
+                    # simulator.cpp pistonEventReceived's id==1 branch: it just setBlockToAir's
+                    # the head, no PistonStructureHelper/canMove() call) - so it never gets a
+                    # PistonMoveExecuted event, and the head would otherwise stay extended
+                    # forever in this timeline. PistonQueued(retract) is queued by checkForMove
+                    # only on a real extended->should-retract transition and always executes (no
+                    # blocked/failure path exists for retract), so it's the reliable signal here.
+                    # A queued extend, unlike retract, can still fail (PistonExtendBlocked) so it
+                    # is intentionally NOT treated as a state change here - only the eventual
+                    # successful PistonMoveExecuted below does that.
+                    if not (ev.flags & _SEF_EXTEND):
+                        ext_steps.append({"tick": ev.executedTick, "order": ev.executedSubtick, "extended": False})
+                        termination_tick = max(termination_tick, ev.executedTick)
+                        events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "pistonRetract", "blockIndex": i})
+                    continue
                 if ev.kind != _PISTON_MOVE_KIND:
                     continue
                 if ev.flags & _SEF_SUCCESS:
@@ -200,6 +223,39 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
             kind = "observerFired" if (ev.flags & _SEF_OBSERVER_ON) else "observerOff"
             events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": kind, "blockIndex": i})
 
+    # Rail (golden/activator)/fence-gate/trapdoor/lamp on-off (kind 17): same shape as the piston
+    # extension timeline above - starts from the block's real t=0 state (stateFlags bit1 powered
+    # or bit2 open covers rail/gate/trapdoor; a lamp's on/off is a block-id swap instead of a meta
+    # bit, so it's read off blockTypeId there) and updated by its own BlockPoweredChanged events.
+    # Subject isn't limited to one block type (same reasoning as ScheduledTickDropped below), so
+    # this loops every index entry rather than pre-filtering by id.
+    powered = []
+    for entry in index:
+        i = key_to_idx.get(entry.originalKey)
+        if i is None:
+            continue
+        s = initial[i]
+        on = (s.blockTypeId == _BLOCK_LIT_REDSTONE_LAMP) or bool(s.stateFlags & 0b110)
+        steps = [{"tick": 0, "order": 0, "on": on}]
+        has_events = False
+        for ev in iter_block_events(data, entry):
+            if ev.kind == _BLOCK_DESTROYED_KIND:
+                # A rail that lost its supporting block (or, in future, anything else destroyed
+                # outside of a piston push) - the visualizer removes it from view at this point
+                # instead of leaving it rendered forever at its last position.
+                termination_tick = max(termination_tick, ev.executedTick)
+                events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "blockDestroyed", "blockIndex": i})
+                continue
+            if ev.kind != _POWERED_CHANGED_KIND:
+                continue
+            has_events = True
+            new_on = bool(ev.flags & _SEF_POWERED_ON)
+            steps.append({"tick": ev.executedTick, "order": ev.executedSubtick, "on": new_on})
+            termination_tick = max(termination_tick, ev.executedTick)
+            events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "poweredOn" if new_on else "poweredOff", "blockIndex": i})
+        if has_events:
+            powered.append({"blockIndex": i, "steps": steps})
+
     # Scheduled-tick collision drop (kind 16): logged purely for diagnosis, see sim_event_log.h's
     # ScheduledTickDropped doc - the collision itself is intentional/unchanged simulator behavior.
     # Its subject is whatever block currently occupies the position at drop time, not necessarily
@@ -219,7 +275,7 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
 
     return {
         "trigger": trigger, "blocks": blocks, "moves": moves, "extensions": extensions,
-        "events": events, "terminationTick": termination_tick,
+        "powered": powered, "events": events, "terminationTick": termination_tick,
     }
 
 

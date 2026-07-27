@@ -246,6 +246,13 @@ export const BLOCK_TYPES: Record<number, BlockType> = {
   251: { id: 251, name: 'concrete', color: '#999999', directional: false }, // Concrete
   252: { id: 252, name: 'concrete_powder', color: '#999999', directional: false }, // Concrete Powder
   255: { id: 255, name: 'structure_block', color: '#999999', directional: false }, // Structure Block
+
+  // Rails - excluded by the generator (their real boundingBox is "empty", same as air/water/lava,
+  // which the generator's filter caught by mistake even though rails have a real texture).
+  27: { id: 27, name: 'golden_rail', color: '#999999', directional: false }, // Powered Rail
+  28: { id: 28, name: 'detector_rail', color: '#999999', directional: false }, // Detector Rail
+  66: { id: 66, name: 'rail', color: '#999999', directional: false }, // Rail
+  157: { id: 157, name: 'activator_rail', color: '#999999', directional: false }, // Activator Rail
 }
 
 const UNKNOWN: BlockType = {

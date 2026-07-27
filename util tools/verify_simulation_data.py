@@ -29,7 +29,7 @@ On-disk layout (must stay in sync with cpp simulator/src/sim_event_log.h):
                             actually fire during the observed run, unlike the dynamic section above
     static push members   : flat uint64 array for the section above, indexed the same way, but a
                             SEPARATE array from the dynamic push-group members
-    footer                : 188 bytes, magic "SDL5", offsets/counts for every section above
+    footer                : 188 bytes, magic "SDL6", offsets/counts for every section above
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ _INITIAL = struct.Struct("<QhhhHBBBBhBBII")             # 32 bytes
 _COMPONENT = struct.Struct("<hBBIhhhhhhIQ")             # 32 bytes
 _SUMMARY = struct.Struct("<BBbBii" + "h" * 12 + "I" * 7)  # 64 bytes
 _WOULDPOWER = struct.Struct("<QQB7x")                   # 24 bytes (7x = 7 pad bytes)
-_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDL5)
+_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDL6)
 assert _EVENT.size == 96, _EVENT.size
 assert _INDEX.size == 32, _INDEX.size
 assert _PUSHGROUP.size == 48, _PUSHGROUP.size
@@ -74,7 +74,7 @@ KIND_NAMES = {
     7: "RedstoneActivatedPiston", 8: "RedstoneDeactivatedPiston",
     9: "PistonExtendBlocked", 10: "PistonRetractBlocked", 11: "BlockLeftBehind",
     12: "BlockDestroyed", 13: "ComponentSplit", 14: "ObserverSuppressed",
-    15: "PistonNeighborNotified", 16: "ScheduledTickDropped",
+    15: "PistonNeighborNotified", 16: "ScheduledTickDropped", 17: "BlockPoweredChanged",
 }
 CAUSE_NAMES = {0: "scheduled", 1: "facing-changed", 2: "observer-moved"}
 DIR_NAMES = {0: "DOWN", 1: "UP", 2: "NORTH", 3: "SOUTH", 4: "WEST", 5: "EAST", 0xFF: "-"}
@@ -100,6 +100,7 @@ SEF_EXTEND = 1 << 0
 SEF_SUCCESS = 1 << 1
 SEF_TARGET_PISTON = 1 << 4
 SEF_OBSERVER_ON = 1 << 5  # ObserverFired/ObserverActivated: set = ON pulse, clear = OFF transition
+SEF_POWERED_ON = 1 << 6  # BlockPoweredChanged: set = now on/open/lit
 
 
 def _unpack21(v: int) -> int:
@@ -200,8 +201,8 @@ def read_footer(data: bytes) -> dict:
      static_push_group_off, static_push_group_count, static_push_member_count,
      static_push_member_off, _r) = \
         _FOOTER.unpack_from(data, len(data) - _FOOTER.size)
-    if magic != b"SDL5":
-        raise ValueError(f"bad magic {magic!r} (expected SDL5)")
+    if magic != b"SDL6":
+        raise ValueError(f"bad magic {magic!r} (expected SDL6)")
     if ev_sz != _EVENT.size or blk_sz != _INDEX.size:
         raise ValueError(f"record size mismatch ev={ev_sz} blk={blk_sz}")
     return {
@@ -312,6 +313,10 @@ def _fmt_event(ev: SimEvent) -> str:
     elif ev.kind == 16:  # ScheduledTickDropped
         src_name = BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
         parts.append(f"DROPPED reschedule of {src_name} at {unpack_pos(ev.blockKey)}")
+    elif ev.kind == 17:  # BlockPoweredChanged
+        src_name = BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
+        parts.append(f"{src_name}")
+        parts.append("ON" if ev.flags & SEF_POWERED_ON else "OFF")
     return "  " + " ".join(parts)
 
 
@@ -463,7 +468,7 @@ def _self_check() -> None:
     body += _PUSHGROUP.pack(0, kB, 0, 0, 0, 1, 0, 0, 0, 0, len(static_members), 0, 2, 0)
 
     footer = _FOOTER.pack(
-        b"SDL5", 5, 0, 0, 3, idx_off, 2, 96, 32,
+        b"SDL6", 6, 0, 0, 3, idx_off, 2, 96, 32,
         pg_rec_off, 1, 48,
         pg_off, len(push_members), 0,
         initial_off, 1, 32,

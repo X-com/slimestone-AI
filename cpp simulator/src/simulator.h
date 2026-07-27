@@ -157,6 +157,8 @@ private:
     void settleMovingBlock(const World::MovingBlock& moving);
     void addMovingBlock(const World::MovingBlock& block);
     void lampUpdateTick(BlockPos pos, std::uint32_t state);
+    void logPoweredChanged(BlockPos pos, int rawBlockId, bool on);
+    void logBlockDestroyed(BlockPos pos, int rawBlockId);
     void scheduleUpdate(BlockPos pos, int blockId, int delay);
     bool isUpdateScheduled(BlockPos pos, int blockId) const;
     void addBlockEvent(BlockPos pos, int blockId, int eventId, int eventParam);

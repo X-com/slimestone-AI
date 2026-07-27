@@ -294,7 +294,7 @@ bool SimEventLog::selfTest() {
     SimLogFooter footer;
     in.seekg(size - static_cast<std::streamoff>(sizeof(SimLogFooter)), std::ios::beg);
     in.read(reinterpret_cast<char*>(&footer), sizeof(footer));
-    if (std::memcmp(footer.magic, "SDL5", 4) != 0 || footer.eventRecSize != sizeof(SimEvent)) {
+    if (std::memcmp(footer.magic, "SDL6", 4) != 0 || footer.eventRecSize != sizeof(SimEvent)) {
         std::cerr << "selftest: bad footer\n";
         return false;
     }

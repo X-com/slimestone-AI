@@ -9,7 +9,7 @@ import {
 } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 import { decodeState } from './blocks'
 import { BLOCK_TYPES } from './blocks'
-import { loadBlockAssets, frontAxis, type BlockAssets } from './textures'
+import { loadBlockAssets, frontAxis, renderKeyFor, isRail, railQuaternion, observerQuaternion, type BlockAssets } from './textures'
 import type { Machine } from './data'
 
 const GAP = 3 // empty cells between machines
@@ -198,7 +198,11 @@ export function createScene(container: HTMLElement): SceneHandle {
         const wz = gz - (blk.z - cz)
 
         const axis = frontAxis(d.blockId)
-        if (axis) {
+        if (isRail(d.blockId)) {
+          quat.copy(railQuaternion(d.meta)) // rails: shape is the raw meta, not the 6-way facing scheme
+        } else if (d.blockId === 218) {
+          quat.copy(observerQuaternion(d.facing)) // exact vanilla per-facing rotation, not a generic derived one
+        } else if (axis) {
           facing.set(d.facingVec[0], d.facingVec[1], d.facingVec[2])
           quat.setFromUnitVectors(axis, facing) // rotate the "front" face toward facing
         } else {
@@ -209,9 +213,12 @@ export function createScene(container: HTMLElement): SceneHandle {
         dummy.scale.set(1, 1, 1)
         dummy.updateMatrix()
 
-        const list = byId.get(d.blockId) ?? []
+        // Fence gates need a different geometry for open vs closed (see renderKeyFor) - every
+        // other block's key is just its own id.
+        const key = renderKeyFor(d.blockId, d.meta)
+        const list = byId.get(key) ?? []
         list.push({ machine: m, matrix: dummy.matrix.clone() })
-        byId.set(d.blockId, list)
+        byId.set(key, list)
 
         mBox.expandByPoint(_bmin.set(wx - 0.5, wy - 0.5, wz - 0.5))
         mBox.expandByPoint(_bmax.set(wx + 0.5, wy + 0.5, wz + 0.5))
