@@ -34,9 +34,8 @@ const SNAP_TICKS = 0.4
 const MANUAL_STEP_MS = 200
 const PISTON_HEAD_ID = 34 // BLOCK_PISTON_HEAD (blocks.py) - already has a texture/geometry entry
 const TRIGGER_COLOR = 0xb14aff // matches scene.ts's trigger glow exactly
-const BLOCKED_COLOR = 0xff3b3b
-const OBSERVER_COLOR = 0xff9d9d // lighter red, distinguishable from a blocked push
-const DROPPED_COLOR = 0xff9800 // orange - a scheduledTickDropped event, distinct from both reds
+const BLOCKED_COLOR = 0xff9d9d // light red - a blocked piston push
+const DROPPED_COLOR = 0xff3b3b // solid red - reserved for a scheduledTickDropped event only
 
 export interface AnimatedSceneHandle {
   loadMachine(machine: Machine): void
@@ -93,6 +92,7 @@ interface EffectOverlay {
   instanceIndex: number
   blockIndex: number
   staticPos: THREE.Vector3 // fallback for a piston/observer that never itself moves
+  quat: THREE.Quaternion // facing rotation to render at - identity for non-directional overlays
 }
 
 // Holds at `cur.pos` for the whole gap since the previous keyframe, then animates into `next.pos`
@@ -189,8 +189,8 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending })
   const triggerMat = overlayMat(TRIGGER_COLOR, 0.5)
   const blockedMat = overlayMat(BLOCKED_COLOR, 0.6)
-  const observerMat = overlayMat(OBSERVER_COLOR, 0.6)
   const droppedMat = overlayMat(DROPPED_COLOR, 0.6)
+  const IDENTITY_QUAT = new THREE.Quaternion()
 
   let meshes: THREE.InstancedMesh[] = []
   let animated: AnimatedBlock[] = []
@@ -244,16 +244,17 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   // something else - it must flash at wherever it currently is, not the spot it started at) shared
   // by a whole overlay type - trigger glow, blocked-push flash, observer-fire flash.
   function buildOverlay(
-    material: THREE.MeshBasicMaterial,
-    entries: { blockIndex: number; pos: THREE.Vector3 }[],
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    entries: { blockIndex: number; pos: THREE.Vector3; quat?: THREE.Quaternion }[],
   ): EffectOverlay[] {
     if (!entries.length) return []
-    const mesh = new THREE.InstancedMesh(overlayGeo, material, entries.length)
+    const mesh = new THREE.InstancedMesh(geometry, material, entries.length)
     mesh.frustumCulled = false
     mesh.renderOrder = 2
     entries.forEach((e, i) => {
       dummy.position.copy(e.pos)
-      dummy.quaternion.identity()
+      dummy.quaternion.copy(e.quat ?? IDENTITY_QUAT)
       dummy.scale.set(1, 1, 1)
       dummy.updateMatrix()
       mesh.setMatrixAt(i, dummy.matrix)
@@ -261,7 +262,9 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     mesh.instanceMatrix.needsUpdate = true
     scene.add(mesh)
     meshes.push(mesh)
-    return entries.map((e, i) => ({ mesh, instanceIndex: i, blockIndex: e.blockIndex, staticPos: e.pos }))
+    return entries.map((e, i) => ({
+      mesh, instanceIndex: i, blockIndex: e.blockIndex, staticPos: e.pos, quat: (e.quat ?? IDENTITY_QUAT).clone(),
+    }))
   }
 
   // The world position a block should render/flash at RIGHT NOW - its own live animated position
@@ -292,7 +295,7 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
 
   function setOverlayVisible(ov: EffectOverlay, pos: THREE.Vector3, visible: boolean) {
     dummy.position.copy(pos)
-    dummy.quaternion.identity()
+    dummy.quaternion.copy(ov.quat)
     const s = visible ? 1 : 0
     dummy.scale.set(s, s, s)
     dummy.updateMatrix()
@@ -418,21 +421,24 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     // Trigger glow (purple, matches scene.ts's multi-machine view) - only while parked at the real
     // t=0 state (tick 0, before any event has happened - see updateEffectOverlays), since the
     // trigger itself is a one-shot "this is where it all starts" marker, not a thing that's ever
-    // "on" once the machine is actually running. Blocked-push (red) / observer (light-red) / a
-    // dropped reschedule (orange) overlays: lit for the tick(s)/interval that block has a matching
-    // event in - see isActiveAtTick / isObserverActiveAtTick.
-    triggerOverlay = buildOverlay(triggerMat, [
+    // "on" once the machine is actually running. Blocked-push (light red) / a dropped reschedule
+    // (solid red, reserved for this event only) overlays: lit for the tick(s)/interval that block
+    // has a matching event in - see isActiveAtTick. The observer's "on" state uses a real lit
+    // texture quad instead of a colored overlay - see observerLitGeo/observerLitMat.
+    triggerOverlay = buildOverlay(overlayGeo, triggerMat, [
       { blockIndex: -1, pos: toWorld(machine.candidate.trigger.x, machine.candidate.trigger.y, machine.candidate.trigger.z) },
     ])[0] ?? null
     const pistonEntries: { blockIndex: number; pos: THREE.Vector3 }[] = []
-    const observerEntries: { blockIndex: number; pos: THREE.Vector3 }[] = []
+    const observerEntries: { blockIndex: number; pos: THREE.Vector3; quat: THREE.Quaternion }[] = []
     blocks.forEach((blk, i) => {
       const id = decodeState(blk.state).blockId
       if (id === 29 || id === 33) pistonEntries.push({ blockIndex: i, pos: toWorld(blk.x, blk.y, blk.z) })
-      else if (id === 218) observerEntries.push({ blockIndex: i, pos: toWorld(blk.x, blk.y, blk.z) })
+      else if (id === 218) {
+        observerEntries.push({ blockIndex: i, pos: toWorld(blk.x, blk.y, blk.z), quat: quatByIndex.get(i) ?? new THREE.Quaternion() })
+      }
     })
-    blockedOverlays = buildOverlay(blockedMat, pistonEntries)
-    observerOverlays = buildOverlay(observerMat, observerEntries)
+    blockedOverlays = buildOverlay(overlayGeo, blockedMat, pistonEntries)
+    observerOverlays = assets ? buildOverlay(assets.observerOnGeo, assets.observerOnMat, observerEntries) : []
 
     events = machine.events ?? []
     terminationTick = machine.terminationTick ?? 0
@@ -445,7 +451,7 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       const blk = blocks[idx]
       return blk ? [{ blockIndex: idx, pos: toWorld(blk.x, blk.y, blk.z) }] : []
     })
-    droppedOverlays = buildOverlay(droppedMat, droppedEntries)
+    droppedOverlays = buildOverlay(overlayGeo, droppedMat, droppedEntries)
 
     // Observer on/off intervals: pair each blockIndex's own alternating observerFired/observerOff
     // ticks by array position (events is already sorted by (tick, order), and a single observer's
@@ -713,7 +719,6 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       overlayGeo.dispose()
       triggerMat.dispose()
       blockedMat.dispose()
-      observerMat.dispose()
       droppedMat.dispose()
       assets?.dispose()
       renderer.dispose()
