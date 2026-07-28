@@ -79,11 +79,10 @@ const FACES: Record<number, [TexName, TexName, TexName, TexName, TexName, TexNam
   33: ['piston_side', 'piston_side', 'piston_top', 'piston_bottom', 'piston_side', 'piston_side'],
   29: ['piston_side_sticky', 'piston_side_sticky', 'piston_top_sticky', 'piston_bottom_sticky', 'piston_side_sticky', 'piston_side_sticky'],
   34: ['piston_side', 'piston_side', 'piston_top', 'piston_side', 'piston_side', 'piston_side'],
-  // observer: output/arrow on +Z (the facingVec-aligned face - see observerQuaternion), eyes on
-  // -Z. Swapped from the front=+Z/back=-Z layout used earlier: that had the arrow pointing at
-  // -facingVec (opposite of where the observer's own facing meta points), which read backwards -
-  // the arrow needs to point toward facingVec, the direction power is actually supplied to.
-  218: ['observer_side', 'observer_side', 'observer_top', 'observer_top', 'observer_back', 'observer_front'],
+  // observer: eyes (watching face) on +Z, the facingVec-aligned face - see observerQuaternion -
+  // arrow (power output) on -Z, opposite facingVec. Matches BlockObserver.updateNeighborsInFront
+  // in vanilla: the pulse goes to pos.offset(facing.getOpposite()), i.e. away from the eyes.
+  218: ['observer_side', 'observer_side', 'observer_top', 'observer_top', 'observer_front', 'observer_back'],
 
   // Every other real Minecraft 1.12 block with a texture, generated (not hand-typed) from the
   // real block registry cross-referenced against public/textures/ - see the TEX_NAMES comment
@@ -493,8 +492,9 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
     // opposite faces (+x vs -x, +y vs -y), which vanilla's own block models routinely correct for
     // one face of the pair (see observer.json: east flips U vs west, up flips V vs down) so a
     // texture with any asymmetric detail doesn't look wrong on exactly one of the two. Keyed by
-    // BoxGeometry face index (0=+x,1=-x,2=+y,3=-y,4=+z,5=-z).
-    flipFaces?: Partial<Record<number, 'u' | 'v'>>,
+    // BoxGeometry face index (0=+x,1=-x,2=+y,3=-y,4=+z,5=-z). 'both' flips u and v together (a
+    // 180-degree in-plane rotation, vs. a single-axis mirror).
+    flipFaces?: Partial<Record<number, 'u' | 'v' | 'both'>>,
   ): THREE.BufferGeometry {
     const geo = new THREE.BoxGeometry(...size)
     const uv = geo.attributes.uv as THREE.BufferAttribute
@@ -510,8 +510,8 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
           v = 1 - u
           u = nu
         }
-        if (flip === 'u') u = 1 - u
-        if (flip === 'v') v = 1 - v
+        if (flip === 'u' || flip === 'both') u = 1 - u
+        if (flip === 'v' || flip === 'both') v = 1 - v
         const fu = PAD + u * (1 - 2 * PAD)
         const fv = PAD + v * (1 - 2 * PAD)
         uv.setXY(idx, (col + fu) / N, (N - 1 - row + fv) / N)
@@ -527,12 +527,13 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
   const fallbackGeo = bake(FACES[1]) // unknown ids render as stone
 
   // Observer override: BoxGeometry's default UV is mirrored between +x/-x and between +y/-y (see
-  // bake()'s flipFaces doc) - vanilla's own observer.json corrects exactly the east face (U-flip,
-  // face index 0) and the up face (V-flip, face index 2) to compensate, leaving west/down as the
-  // unflipped baseline. Without this, observer_side/observer_top look wrong on those 2 faces in
-  // every orientation - it's baked into the untransformed geometry, not something any per-facing
-  // rotation could fix.
-  if (FACES[218]) geos.set(218, bake(FACES[218], [1, 1, 1], [0, 0, 0], false, { 0: 'u', 2: 'v' }))
+  // bake()'s flipFaces doc). West (face index 1, U-flip) makes the two side faces' zigzag read
+  // consistently (confirmed correct visually). observer_top's wedge is U-symmetric (mirroring U
+  // is a no-op on it) but very much V-asymmetric (apex vs. base) - screenshots showed it pointing
+  // backwards, so the V-flip needed to be on the *other* face of the up/down pair: down (index 3)
+  // now carries it instead of up (index 2), which flips both faces' absolute direction while
+  // keeping them mutually consistent (still exactly one of the pair flipped).
+  if (FACES[218]) geos.set(218, bake(FACES[218], [1, 1, 1], [0, 0, 0], false, { 1: 'u', 3: 'v' }))
 
   // Non-cube blocks: still one geometry per id (shared across all instances, like every other
   // block), just squashed/offset instead of a full unit cube - a shape approximation (real
@@ -637,13 +638,13 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
     ]),
   )
 
-  // Observer "on" box - same face layout as FACES[218] (side/side/top/top/back/front, arrow
-  // toward facingVec) but using the DABB-powered variant of every face, baked with the same
-  // helper as any other block - same east/up UV-flip correction as the base observer geometry
-  // above, for the same reason.
+  // Observer "on" box - same face layout as FACES[218] (side/side/top/top/front/back, eyes
+  // toward facingVec, arrow away) but using the DABB-powered variant of every face, baked with
+  // the same helper as any other block - same west/down UV-flip correction as the base
+  // observer geometry above, for the same reason.
   const observerOnGeo = bake(
-    ['observer_side_on', 'observer_side_on', 'observer_top_on', 'observer_top_on', 'observer_back_on', 'observer_front_on'],
-    [1, 1, 1], [0, 0, 0], false, { 0: 'u', 2: 'v' },
+    ['observer_side_on', 'observer_side_on', 'observer_top_on', 'observer_top_on', 'observer_front_on', 'observer_back_on'],
+    [1, 1, 1], [0, 0, 0], false, { 1: 'u', 3: 'v' },
   )
   const observerOnMat = new THREE.MeshLambertMaterial({
     map: atlas,
