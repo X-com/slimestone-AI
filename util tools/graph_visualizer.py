@@ -69,6 +69,10 @@ def _node_id(index: int) -> str:
     return f"n{index}"
 
 
+def _html_escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def build_dot(data: bytes, name: str) -> str:
     footer = vsd.read_footer(data)
     index = vsd.read_block_index(data, footer)
@@ -96,42 +100,42 @@ def build_dot(data: bytes, name: str) -> str:
         f'  labelloc=t; label="{name}";',
     ]
 
-    by_tick: dict[int, list[int]] = {}
+    # Edges, read straight off actorKey/targetKey - no inference. A cause-edge is drawn from the
+    # most recent upstream event on the actor's subject block (the thing that fired) to this event.
+    # Computed in the SAME pass as the last_piston_move/last_observer_fire/last_redstone_event
+    # dict updates below (not a second pass over the finished dicts) - a dict lookup has to see
+    # only what happened before event i, not the whole log's final state, or a subject's *last*
+    # occurrence anywhere in the file (however much later) gets treated as every earlier event's
+    # cause, producing backwards (later -> earlier) edges that force Graphviz to flip part of the
+    # layout to break the resulting rank cycle.
+    edges: set[tuple[int, int]] = set()
     for i, ev in enumerate(kept):
         kind_name = vsd.KIND_NAMES[ev.kind]
         color = KIND_COLORS.get(kind_name, "#dddddd")
         pos = vsd.unpack_pos(ev.blockKey)
-        label_lines = [f"{kind_name}", f"{pos} t={ev.activationTick}.{ev.activationSubtick}"]
+        info_lines = [f"{kind_name}", f"{pos}"]
         if ev.kind in (1, 9, 10):  # PistonMoveExecuted / *Blocked
             status = "moved" if ev.flags & vsd.SEF_SUCCESS else "BLOCKED"
-            label_lines.append(status)
+            info_lines.append(status)
             if ev.failureReason:
-                label_lines.append(vsd.FAILURE_REASON_NAMES.get(ev.failureReason, str(ev.failureReason)))
+                info_lines.append(vsd.FAILURE_REASON_NAMES.get(ev.failureReason, str(ev.failureReason)))
         if ev.kind == 3:  # ObserverFired
-            label_lines.append(f"cause={vsd.CAUSE_NAMES.get((ev.flags >> 2) & 3, '?')}")
+            info_lines.append(f"cause={vsd.CAUSE_NAMES.get((ev.flags >> 2) & 3, '?')}")
         if ev.kind == 15:  # PistonNeighborNotified: generic catch-all cause
             src_name = vsd.BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
-            label_lines.append(f"from {vsd.unpack_pos(ev.actorKey)} (was {src_name})")
-        label = "\\n".join(label_lines)
-        lines.append(f'  {_node_id(i)} [label="{label}", fillcolor="{color}"];')
-        by_tick.setdefault(ev.activationTick, []).append(i)
+            info_lines.append(f"from {vsd.unpack_pos(ev.actorKey)} (was {src_name})")
+        # Two-column label: left = "subtick - tick" (the ordering key), right = what happened.
+        # HTML-like label (the <...> form) so the two columns can sit in one bordered table.
+        tick_cell = f"{ev.activationSubtick} - {ev.activationTick}"
+        info_html = "<BR/>".join(_html_escape(s) for s in info_lines)
+        label = (
+            '<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">'
+            f'<TR><TD BGCOLOR="{color}"><FONT POINT-SIZE="10">{tick_cell}</FONT></TD>'
+            f'<TD BGCOLOR="{color}" ALIGN="LEFT"><FONT POINT-SIZE="10">{info_html}</FONT></TD>'
+            '</TR></TABLE>>'
+        )
+        lines.append(f'  {_node_id(i)} [label={label}, shape=plaintext];')
 
-        if ev.kind == 1:  # PistonMoveExecuted
-            last_piston_move[ev.blockKey] = i
-        elif ev.kind == 3:  # ObserverFired
-            last_observer_fire[ev.blockKey] = i
-        elif ev.kind in (7, 8):  # Redstone(De)ActivatedPiston
-            last_redstone_event[ev.blockKey] = i
-
-    # Rank by tick so time flows top-to-bottom.
-    for tick, idxs in sorted(by_tick.items()):
-        same_rank = ", ".join(_node_id(i) for i in idxs)
-        lines.append(f'  {{ rank=same; {same_rank} }}')
-
-    # Edges, read straight off actorKey/targetKey - no inference. A cause-edge is drawn from the
-    # most recent upstream event on the actor's subject block (the thing that fired) to this event.
-    edges: set[tuple[int, int]] = set()
-    for i, ev in enumerate(kept):
         if ev.kind == 2:  # BlockPushed: actorKey is the piston that pushed it
             src = last_piston_move.get(ev.actorKey)
             if src is not None:
@@ -171,6 +175,19 @@ def build_dot(data: bytes, name: str) -> str:
                     # its own base). This is what used to show up as an "uncaused" piston move.
                     edges.add((j, i))
                     break
+
+        if ev.kind == 1:  # PistonMoveExecuted
+            last_piston_move[ev.blockKey] = i
+        elif ev.kind == 3:  # ObserverFired
+            last_observer_fire[ev.blockKey] = i
+        elif ev.kind in (7, 8):  # Redstone(De)ActivatedPiston
+            last_redstone_event[ev.blockKey] = i
+
+    # Force strict single-column top-to-bottom order (by subtick/tick, since `kept` is already
+    # sorted by globalSeq) - an invisible chain edge between consecutive nodes, instead of
+    # `rank=same` clusters, which let Graphviz spread same-tick events out sideways.
+    for i in range(len(kept) - 1):
+        lines.append(f'  {_node_id(i)} -> {_node_id(i + 1)} [style=invis, weight=100];')
 
     for a, b in sorted(edges):
         lines.append(f"  {_node_id(a)} -> {_node_id(b)};")
