@@ -19,6 +19,7 @@ from verify_simulation_data import (  # noqa: E402
     FAILURE_REASON_NAMES,
     KIND_NAMES,
     MOVABILITY_NAMES,
+    MOVING_END_CAUSE_NAMES,
     STICKINESS_NAMES,
     TERMINATION_NAMES,
     BlockIndexEntry,
@@ -46,7 +47,7 @@ from verify_simulation_data import (  # noqa: E402
 
 __all__ = [
     "BLOCK_NAMES", "CAUSE_NAMES", "DIR_NAMES", "FAILURE_REASON_NAMES", "KIND_NAMES",
-    "MOVABILITY_NAMES", "STICKINESS_NAMES", "TERMINATION_NAMES",
+    "MOVABILITY_NAMES", "MOVING_END_CAUSE_NAMES", "STICKINESS_NAMES", "TERMINATION_NAMES",
     "BlockIndexEntry", "ComponentRecord", "InitialBlockState", "PushGroupRecord",
     "RunSummary", "SimEvent", "WouldPowerEdge",
     "iter_block_events", "read_block_index", "read_component_members", "read_components",

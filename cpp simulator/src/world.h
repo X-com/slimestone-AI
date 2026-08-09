@@ -79,6 +79,19 @@ struct World {
         int facing = 0;
         bool extending = false;
         bool shouldHeadBeRendered = false;
+        // simulation_data provenance only - never read by simulation logic, and deliberately NOT
+        // part of the cycle-detection state hash, which hashes named fields (pos/pistonState/
+        // phase/facing/extending/shouldHeadBeRendered) rather than raw struct bytes (see
+        // Simulator::stateKey). Adding fields here therefore cannot change StateKey, cycle
+        // detection, or any control flow. They exist so BlockSettled/MovingBlockDropped can name
+        // the block that was in flight, pair it back to its originating BlockPushed, and report
+        // the real flight duration (which is NOT always 2 ticks - a sticky piston pulsed shorter
+        // than that settles its block early via clearMovingAt).
+        std::uint64_t subjectKey = 0;    // stable key of the carried block (0 = piston head: no original block)
+        std::uint64_t actorKey = 0;      // the acting piston
+        std::uint32_t pushGroupId = 0;   // pairs the settle with its BlockPushed
+        std::int64_t createdTick = 0;
+        std::uint32_t createdSubtick = 0;
     };
 
     std::int64_t time = 0;

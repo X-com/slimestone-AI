@@ -68,6 +68,7 @@ _OBSERVER_FIRED_KIND = next(k for k, name in KIND_NAMES.items() if name == "Obse
 _SCHEDULED_DROP_KIND = next(k for k, name in KIND_NAMES.items() if name == "ScheduledTickDropped")
 _POWERED_CHANGED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockPoweredChanged")
 _BLOCK_DESTROYED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockDestroyed")
+_BLOCK_SETTLED_KIND = next(k for k, name in KIND_NAMES.items() if name == "BlockSettled")
 _PISTON_IDS = {BLOCK_PISTON, BLOCK_STICKY_PISTON}
 # sim_event_log.h's SEF_EXTEND/SEF_SUCCESS/SEF_OBSERVER_ON/SEF_POWERED_ON flag bits (not
 # re-exported by transformer_gym.simlog_reader - only verify_simulation_data.py defines them).
@@ -153,12 +154,29 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
         if i is None:
             continue
         steps = []
+        # A push and its matching arrival are two separate events (BlockPushed when the block
+        # leaves, BlockSettled when it lands - usually 2 ticks later, but sooner when a short
+        # piston pulse cancels the move early). They share a pushGroupId, which is what pairs
+        # them here so each keyframe can carry its own real arrival moment instead of a constant.
+        settle_by_group = {}
         for ev in iter_block_events(data, entry):
+            if ev.kind == _BLOCK_SETTLED_KIND:
+                settle_by_group[ev.pushGroupId] = ev
+                termination_tick = max(termination_tick, ev.executedTick)
+                events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "blockSettled", "blockIndex": i})
+                continue
             if ev.kind != _BLOCK_PUSHED_KIND:
                 continue
-            steps.append({"tick": ev.executedTick, "order": ev.executedSubtick, "x": ev.toX, "y": ev.toY, "z": ev.toZ})
+            steps.append({"tick": ev.executedTick, "order": ev.executedSubtick, "x": ev.toX, "y": ev.toY, "z": ev.toZ,
+                          "group": ev.pushGroupId})
             termination_tick = max(termination_tick, ev.executedTick)
             events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "blockPushed", "blockIndex": i})
+        for step in steps:
+            settle = settle_by_group.get(step.pop("group"))
+            # No matching settle (a block destroyed mid-flight, or an older log) degrades to
+            # "arrived instantly" - the visualizer then just never shows it as in-flight.
+            step["arriveTick"] = settle.executedTick if settle is not None else step["tick"]
+            step["arriveOrder"] = settle.executedSubtick if settle is not None else step["order"]
         if steps:
             moves.append({"blockIndex": i, "steps": steps})
 

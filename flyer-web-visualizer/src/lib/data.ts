@@ -42,6 +42,13 @@ export interface MoveStep {
   x: number
   y: number
   z: number
+  // When the block actually ARRIVED, from its own BlockSettled event (paired to this push by
+  // pushGroupId in stream_to_visualizer.py). A piston push isn't instant: the destination cell
+  // holds an immovable placeholder while the block is in flight, normally for 2 ticks but less
+  // when a short piston pulse cancels the move early. Between (tick, order) and
+  // (arriveTick, arriveOrder) the block renders semi-transparent - see animatedScene's flights.
+  arriveTick: number
+  arriveOrder: number
 }
 export interface BlockMove {
   blockIndex: number // index into candidate.blocks
@@ -93,6 +100,7 @@ export type MachineEventKind =
   | 'poweredOn'
   | 'poweredOff'
   | 'blockDestroyed'
+  | 'blockSettled'
 export interface MachineEvent {
   tick: number
   order: number

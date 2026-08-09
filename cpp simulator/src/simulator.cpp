@@ -336,6 +336,47 @@ void Simulator::logPoweredChanged(BlockPos pos, int rawBlockId, bool on) {
     eventLog_->push(ev);
 }
 
+// simulation_data: an in-flight moving block reached the end of its flight - either it settled
+// into the world (BlockSettled) or it was destroyed on the way (MovingBlockDropped). Callers MUST
+// invoke this before the setBlockState/neighborChanged pair that performs the settle, so this
+// record gets a lower globalSeq than every event the resulting neighbour cascade produces and the
+// cascade reads as its consequence (same ordering convention BlockPushed already follows).
+void Simulator::logMovingBlockEnded(const World::MovingBlock& moving, bool settled, std::uint8_t cause) {
+    if (eventLog_ == nullptr) {
+        return;
+    }
+    const Facing& facing = facingByIndex(moving.facing);
+    // The source cell is the one the block came from: an extend walks along the facing, a retract
+    // (sticky pull-back / the piston base's own move) walks against it.
+    BlockPos from = offset(moving.pos, moving.extending ? opposite(facing) : facing);
+    SimEvent ev;
+    // A piston head has no original block of its own, so it has no stableKey - file it under the
+    // acting piston and let reserved0 (== BLOCK_PISTON_HEAD) say what it actually was.
+    ev.blockKey = moving.subjectKey != 0 ? moving.subjectKey : moving.actorKey;
+    ev.actorKey = moving.actorKey;
+    ev.targetKey = stableKey(moving.pos);
+    ev.kind = settled ? BlockSettled : MovingBlockDropped;
+    ev.direction = static_cast<std::uint8_t>(moving.facing);
+    ev.pushGroupId = moving.pushGroupId;
+    ev.reserved0 = static_cast<std::uint8_t>(moving.pistonBlockId & 0xFF);
+    ev.reserved1 = cause;
+    std::uint32_t order = eventLog_->nextOrder();
+    // scheduled = when the block left, executed = when it actually arrived. The gap is the real
+    // flight duration; it is 2 for a normal settle but shorter whenever a sticky piston's short
+    // pulse cancelled the move early, which is exactly why this isn't assumed to be a constant.
+    ev.scheduledTick = moving.createdTick;
+    ev.scheduledSubtick = moving.createdSubtick;
+    ev.activationTick = ev.executedTick = world_.time;
+    ev.activationSubtick = ev.executedSubtick = order;
+    ev.fromX = static_cast<std::int16_t>(from.x);
+    ev.fromY = static_cast<std::int16_t>(from.y);
+    ev.fromZ = static_cast<std::int16_t>(from.z);
+    ev.toX = static_cast<std::int16_t>(moving.pos.x);
+    ev.toY = static_cast<std::int16_t>(moving.pos.y);
+    ev.toZ = static_cast<std::int16_t>(moving.pos.z);
+    eventLog_->push(ev);
+}
+
 // simulation_data: a block vanished from the world outside of a piston push - currently only a
 // rail losing its supporting block (railNeighborChanged). Without this the visualizer has no
 // signal that the block is gone and keeps rendering it forever at its original spot.
@@ -485,8 +526,16 @@ void Simulator::settleMovingBlock(const World::MovingBlock& moving) {
         trace_->log(world_, "te.rem", &moving.pos, 1, 0);
     }
     if (blockId(world_.getBlock(moving.pos)) == BLOCK_PISTON_EXTENSION) {
+        // Emitted before the write, so the neighbour cascade below sorts after it - see
+        // logMovingBlockEnded's doc. The caller (updateEntities) already swapped this entry out of
+        // movingBuckets, so the setBlockState's own removeMovingAt finds nothing and cannot emit a
+        // phantom MovingBlockDropped for the block that just settled successfully.
+        logMovingBlockEnded(moving, true, SEM_SETTLE_SCHEDULED);
         setBlockState(moving.pos, moving.pistonState, 3);
         neighborChanged(moving.pos, moving.pistonBlockId, moving.pos);
+    } else {
+        // Something overwrote the placeholder before its arm completed - the carried block is gone.
+        logMovingBlockEnded(moving, false, SEM_DROP_NOT_PLACEHOLDER);
     }
     if (trace_ != nullptr) {
         trace_->log(world_, "te.rm", &moving.pos, 1, 0);
@@ -1448,13 +1497,24 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
         setBlockState(pos, setMetaBit(state, 3, true), 3);
     } else if (id == 1) {
         BlockPos front = offset(pos, facing);
-        clearMovingAt(front);
+        // The short-pulse case: this retract can land before the head's own extend arm has
+        // completed, settling it early instead of at the usual 2 ticks.
+        clearMovingAt(front, SEM_SETTLE_HEAD_CANCELLED);
         setBlockState(pos, setFacingMeta(makeState(BLOCK_PISTON_EXTENSION, sticky ? 8 : 0), facing.index), 3);
         if (trace_ != nullptr) {
             trace_->log(world_, "te.set", &pos);
         }
-        addMovingBlock(
-            World::MovingBlock{pos, makeState(blockId(state), param), blockId(state), facing.index, false, true});
+        {
+            // The retracting head animation: subject is the piston itself, and it belongs to no
+            // doPistonMove push group (pushGroupId stays 0 = n/a).
+            World::MovingBlock retractArm{pos, makeState(blockId(state), param), blockId(state), facing.index, false, true};
+            if (eventLog_ != nullptr) {
+                retractArm.subjectKey = retractArm.actorKey = stableKey(pos);
+                retractArm.createdTick = world_.time;
+                retractArm.createdSubtick = eventLog_->nextOrder();
+            }
+            addMovingBlock(retractArm);
+        }
 
         if (sticky) {
             BlockPos pull = offset(pos, facing, 2);
@@ -1462,7 +1522,8 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
             int pullId = blockId(pullState);
             bool clearedExtendingMoving = false;
             if (pullId == BLOCK_PISTON_EXTENSION && isExtendingMovingAt(pull, facing.index)) {
-                clearMovingAt(pull);
+                // Pulling back a block that is itself still in flight - it settles early too.
+                clearMovingAt(pull, SEM_SETTLE_STICKY_PULLBACK);
                 clearedExtendingMoving = true;
             }
             if (!clearedExtendingMoving && pullId != BLOCK_AIR
@@ -1646,6 +1707,11 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
                 }
             }
         }
+        // Provenance handed to the MovingBlock below so its eventual BlockSettled can name the same
+        // subject and push group as the BlockPushed emitted here. Created-subtick deliberately
+        // reuses this event's own order value - the push IS the moment the flight began.
+        std::uint64_t movedSubjectKey = 0;
+        std::uint32_t movedCreatedSubtick = 0;
         if (eventLog_ != nullptr) {
             std::uint64_t sourceKey = packPos(source);
             std::uint64_t targetKey = packPos(target);
@@ -1685,6 +1751,8 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             ev.scheduledTick = queued.found ? queued.tick : world_.time;
             ev.scheduledSubtick = queued.found ? queued.subtick : order;
             eventLog_->push(ev);
+            movedSubjectKey = original;
+            movedCreatedSubtick = order;
         }
         setBlockState(source, 0, 2);
         setBlockState(target, setFacingMeta(makeState(BLOCK_PISTON_EXTENSION, 0), direction.index), 4);
@@ -1692,8 +1760,15 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
         if (trace_ != nullptr) {
             trace_->log(world_, "te.set", &target);
         }
-        addMovingBlock(
-            World::MovingBlock{target, movedState, blockId(movedState), direction.index, extending, false});
+        {
+            World::MovingBlock arm{target, movedState, blockId(movedState), direction.index, extending, false};
+            arm.subjectKey = movedSubjectKey;
+            arm.actorKey = pistonSubject;
+            arm.pushGroupId = pushGroup;
+            arm.createdTick = world_.time;
+            arm.createdSubtick = movedCreatedSubtick;
+            addMovingBlock(arm);
+        }
         aiblockstate[static_cast<std::size_t>(--k)] = movedState;
     }
     if (extending) {
@@ -1704,8 +1779,20 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
         if (trace_ != nullptr) {
             trace_->log(world_, "te.set", &front);
         }
-        addMovingBlock(
-            World::MovingBlock{front, makeState(BLOCK_PISTON_HEAD, headMeta), BLOCK_PISTON_HEAD, direction.index, true, true});
+        {
+            // The head has no original block of its own, so subjectKey stays 0 and its settle files
+            // under the acting piston (see logMovingBlockEnded) - this is the head's only
+            // first-class appearance in the log. It shares the push group so a reader can see the
+            // head and the blocks it pushed arriving as one actuation.
+            World::MovingBlock headArm{front, makeState(BLOCK_PISTON_HEAD, headMeta), BLOCK_PISTON_HEAD, direction.index, true, true};
+            if (eventLog_ != nullptr) {
+                headArm.actorKey = pistonSubject;
+                headArm.pushGroupId = pushGroup;
+                headArm.createdTick = world_.time;
+                headArm.createdSubtick = eventLog_->nextOrder();
+            }
+            addMovingBlock(headArm);
+        }
     }
 
     k = 0;
@@ -1932,6 +2019,15 @@ void Simulator::setBlockToAir(BlockPos pos) {
 void Simulator::removeMovingAt(BlockPos pos) {
     for (std::vector<World::MovingBlock>& bucket : world_.movingBuckets) {
         auto oldSize = bucket.size();
+        // Each erased arm is a block that was in flight and will now never arrive - log it before
+        // dropping it on the floor, while the record still exists to describe.
+        if (eventLog_ != nullptr) {
+            for (const World::MovingBlock& moving : bucket) {
+                if (samePos(moving.pos, pos)) {
+                    logMovingBlockEnded(moving, false, SEM_DROP_CELL_OVERWRITTEN);
+                }
+            }
+        }
         bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
             [pos](const World::MovingBlock& moving) {
                 return samePos(moving.pos, pos);
@@ -1942,20 +2038,29 @@ void Simulator::removeMovingAt(BlockPos pos) {
     }
 }
 
-bool Simulator::clearMovingAt(BlockPos pos) {
+bool Simulator::clearMovingAt(BlockPos pos, std::uint8_t cause) {
     for (std::vector<World::MovingBlock>& bucket : world_.movingBuckets) {
         for (auto it = bucket.begin(); it != bucket.end(); ++it) {
             if (!samePos(it->pos, pos)) {
                 continue;
             }
             World::MovingBlock moving = *it;
+            // Erased BEFORE the setBlockState below, so that write's own removeMovingAt finds
+            // nothing and can't emit a duplicate MovingBlockDropped for this same arm. Preserving
+            // this order matters as much as the logging itself.
             bucket.erase(it);
             if (trace_ != nullptr) {
                 trace_->log(world_, "te.rem", &pos);
             }
             if (blockId(world_.getBlock(pos)) == BLOCK_PISTON_EXTENSION) {
+                // The early-arrival path: this settle is happening in the tick's block-event phase
+                // rather than waiting for updateEntities, so the block lands sooner than the usual
+                // 2 ticks. logMovingBlockEnded's scheduled->executed gap records how much sooner.
+                logMovingBlockEnded(moving, true, cause);
                 setBlockState(pos, moving.pistonState, 3);
                 neighborChanged(pos, moving.pistonBlockId, pos);
+            } else {
+                logMovingBlockEnded(moving, false, SEM_DROP_NOT_PLACEHOLDER);
             }
             return true;
         }

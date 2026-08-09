@@ -54,7 +54,31 @@ enum SimEventKind : std::uint8_t {
     // can tell which of the four it is without a second lookup); flags bit SEF_POWERED_ON = new
     // state (set = now on/open/lit, clear = now off/closed/unlit).
     BlockPoweredChanged = 17,
+    // SDL7 additions: the other half of a piston push. BlockPushed marks the moment a block LEAVES
+    // (its destination cell is set to a BLOCK_PISTON_EXTENSION placeholder, id 36, which is
+    // immovable while in flight); these two mark how that flight ended. Without them a reader
+    // replaying the log sees blocks teleport on the push tick and computes push legality against a
+    // board that never existed - the placeholder really is in the way for the whole flight.
+    //   BlockSettled: the carried block arrived and was written into the world. scheduledTick/
+    //   scheduledSubtick = creation moment, executedTick/executedSubtick = actual settle moment, so
+    //   the flight duration is (executed - scheduled) rather than an assumed constant. It is NOT
+    //   always 2: a sticky piston pulsed shorter than 2 ticks cancels the in-flight move and
+    //   settles early (see SEM_* causes). reserved0 = raw carried block id (34 = piston head, which
+    //   has no original block of its own and so is filed under the acting piston's key).
+    BlockSettled = 18,
+    //   MovingBlockDropped: the in-flight block was destroyed and never arrived at all.
+    MovingBlockDropped = 19,
 };
+
+// SimEvent.reserved1 on BlockSettled/MovingBlockDropped: which path ended the flight. This is not
+// cosmetic - SEM_SETTLE_SCHEDULED runs in the tick's entity phase (updateEntities) while the two
+// cancel causes run in its earlier block-event phase, so the same tick number means a different
+// position in the update order. executedSubtick records exactly where.
+constexpr std::uint8_t SEM_SETTLE_SCHEDULED       = 0; // updateEntities: the normal T+2 path
+constexpr std::uint8_t SEM_SETTLE_HEAD_CANCELLED  = 1; // clearMovingAt(front) on retract
+constexpr std::uint8_t SEM_SETTLE_STICKY_PULLBACK = 2; // clearMovingAt(pull): in-flight block pulled back
+constexpr std::uint8_t SEM_DROP_CELL_OVERWRITTEN  = 3; // removeMovingAt: destination cell replaced
+constexpr std::uint8_t SEM_DROP_NOT_PLACEHOLDER   = 4; // settle path found the cell no longer holding id 36
 
 // SimEvent.failureReason (0 = success/none). Populated on the *Blocked and PistonMoveExecuted(blocked)
 // records, and mirrored onto the PushGroupRecord.
@@ -244,9 +268,13 @@ struct RunSummary {
 // SDL4 reader would otherwise silently misinterpret bit 5 as always-zero/OFF for every historical
 // ObserverFired record. Bumped SDL5->SDL6 for the new BlockPoweredChanged kind + SEF_POWERED_ON
 // flag bit (rails/fence gates/trapdoors/lamps turning on/off) - again no new fields, same reasoning.
+// Bumped SDL6->SDL7 for the BlockSettled/MovingBlockDropped kinds + the SEM_* cause byte now
+// carried in reserved1 - no new fields again (both reuse existing SimEvent slots), but an SDL6
+// reader would read reserved1 as always-zero padding and silently mistake every early/cancelled
+// settle for a normal scheduled one.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '6'};
-    std::uint32_t formatVersion = 6;
+    char          magic[4] = {'S', 'D', 'L', '7'};
+    std::uint32_t formatVersion = 7;
     std::uint64_t simulatorBuildHash = 0;
     std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;

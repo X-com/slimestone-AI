@@ -159,6 +159,9 @@ private:
     void lampUpdateTick(BlockPos pos, std::uint32_t state);
     void logPoweredChanged(BlockPos pos, int rawBlockId, bool on);
     void logBlockDestroyed(BlockPos pos, int rawBlockId);
+    // Shared emitter for both ends of a moving block's fate (BlockSettled / MovingBlockDropped) -
+    // every settle and drop path routes through here so the record shape can't drift between them.
+    void logMovingBlockEnded(const World::MovingBlock& moving, bool settled, std::uint8_t cause);
     void scheduleUpdate(BlockPos pos, int blockId, int delay);
     bool isUpdateScheduled(BlockPos pos, int blockId) const;
     void addBlockEvent(BlockPos pos, int blockId, int eventId, int eventParam);
@@ -217,7 +220,9 @@ private:
     void setBlockState(BlockPos pos, std::uint32_t state, int flags);
     void setBlockToAir(BlockPos pos);
     void removeMovingAt(BlockPos pos);
-    bool clearMovingAt(BlockPos pos);
+    // cause is one of SEM_SETTLE_HEAD_CANCELLED / SEM_SETTLE_STICKY_PULLBACK - clearMovingAt can't
+    // tell its two callers apart on its own, and the distinction is real (see the SEM_* doc).
+    bool clearMovingAt(BlockPos pos, std::uint8_t cause);
     bool hasMovingAt(BlockPos pos) const;
     bool isExtendingMovingAt(BlockPos pos, int facing) const;
     ShiftCycle* detectShiftCycle(int maxTicks, ShiftCycle& out);

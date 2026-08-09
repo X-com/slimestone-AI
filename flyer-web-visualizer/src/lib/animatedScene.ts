@@ -39,6 +39,9 @@ const PISTON_HEAD_ID = 34 // BLOCK_PISTON_HEAD (blocks.py) - already has a textu
 const TRIGGER_COLOR = 0xb14aff // matches scene.ts's trigger glow exactly
 const BLOCKED_COLOR = 0xff9d9d // light red - a blocked piston push
 const DROPPED_COLOR = 0xff3b3b // solid red - reserved for a scheduledTickDropped event only
+// How see-through a block is while it is still travelling between two cells (its BlockPushed and
+// its BlockSettled). Half, so it reads as clearly unfinished without becoming hard to locate.
+const GHOST_OPACITY = 0.5
 
 export interface AnimatedSceneHandle {
   loadMachine(machine: Machine): void
@@ -66,6 +69,15 @@ interface ExtKeyframe {
   extended: boolean
 }
 
+// A block's in-flight window: it left at (tick, order) and only actually landed at
+// (arriveTick, arriveOrder). See data.ts's MoveStep - a piston push is not instant.
+interface Flight {
+  tick: number
+  order: number
+  arriveTick: number
+  arriveOrder: number
+}
+
 interface AnimatedBlock {
   blockIndex: number
   mesh: THREE.InstancedMesh
@@ -75,6 +87,12 @@ interface AnimatedBlock {
   renderPos: THREE.Vector3 // manual mode only: the currently-displayed position (persists across frames)
   transFrom: THREE.Vector3 | null // manual mode only: mid-transition source (forward steps animate)
   transTo: THREE.Vector3 | null
+  // Same geometry as `mesh` but a half-transparent material, shown INSTEAD of the solid instance
+  // while this block is mid-flight. Per-instance opacity isn't a thing on a standard three.js
+  // material, so the two-mesh swap is how one instance renders at two opacities - the same
+  // base/alt trick toggleEntries already uses for fence gates/trapdoors.
+  ghost: MeshInstanceRef | null
+  flights: Flight[]
 }
 
 interface AnimatedHead {
@@ -225,6 +243,10 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   const IDENTITY_QUAT = new THREE.Quaternion()
 
   let meshes: THREE.InstancedMesh[] = []
+  // Per-machine clones of the shared block materials, made transparent for the in-flight ghosts.
+  // Cloned (not shared) because opacity is a material-level property, so the solid and ghost looks
+  // can't come from one instance - and disposed on unload, unlike assets' own cached materials.
+  let ghostMats: THREE.Material[] = []
   let animated: AnimatedBlock[] = []
   let animatedByIndex = new Map<number, AnimatedBlock>()
   let heads: AnimatedHead[] = []
@@ -269,6 +291,8 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       m.dispose()
     }
     meshes = []
+    for (const m of ghostMats) m.dispose()
+    ghostMats = []
     animated = []
     animatedByIndex = new Map()
     heads = []
@@ -362,6 +386,26 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       intervals.some(
         (iv) => atOrAfter(tick, order, iv.onTick, iv.onOrder) && !atOrAfter(tick, order, iv.offTick, iv.offOrder),
       )
+    )
+  }
+
+  // Where playback currently sits, in the same (tick, order) terms every logged event uses. Manual
+  // stepping resolves to the pointed-at event exactly; auto playback only knows whole ticks, so it
+  // reports an order past any real one (every same-tick event counts as already happened).
+  function playhead(): { tick: number; order: number } {
+    if (mode === 'manual') {
+      return eventIndex < 0 ? { tick: 0, order: -1 } : { tick: events[eventIndex].tick, order: events[eventIndex].order }
+    }
+    return { tick: currentTick(), order: Number.POSITIVE_INFINITY }
+  }
+
+  // True while this block has left its old cell but not yet landed - half-open, so the instant it
+  // arrives it is solid again. Auto mode's infinite order makes this a pure tick comparison; a
+  // same-tick early arrival (short piston pulse) is then never in-flight there, which is correct:
+  // it left and landed inside one tick.
+  function isInFlight(block: AnimatedBlock, tick: number, order: number): boolean {
+    return block.flights.some(
+      (f) => atOrAfter(tick, order, f.tick, f.order) && !atOrAfter(tick, order, f.arriveTick, f.arriveOrder),
     )
   }
 
@@ -502,13 +546,53 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       if (!start || !initial) return []
       // order -1 for the real t=0 state - sorts before every logged event (all have order >= 0).
       const keyframes: PosKeyframe[] = [{ tick: 0, order: -1, pos: toWorld(initial.x, initial.y, initial.z) }]
-      for (const step of mv.steps) keyframes.push({ tick: step.tick, order: step.order, pos: toWorld(step.x, step.y, step.z) })
+      const flights: Flight[] = []
+      for (const step of mv.steps) {
+        keyframes.push({ tick: step.tick, order: step.order, pos: toWorld(step.x, step.y, step.z) })
+        // Older records (or a block destroyed in flight) have no distinct arrival - skip those
+        // rather than emit a zero-length window that could never match anyway.
+        if (step.arriveTick > step.tick || (step.arriveTick === step.tick && step.arriveOrder > step.order)) {
+          flights.push({ tick: step.tick, order: step.order, arriveTick: step.arriveTick, arriveOrder: step.arriveOrder })
+        }
+      }
       return [{
         blockIndex: mv.blockIndex, mesh: start.mesh, instanceIndex: start.instanceIndex, quat: start.quat, keyframes,
         renderPos: keyframes[0].pos.clone(), transFrom: null, transTo: null,
+        ghost: null as MeshInstanceRef | null, flights,
       }]
     })
     animatedByIndex = new Map(animated.map((a) => [a.blockIndex, a]))
+
+    // In-flight ghosts: one transparent twin per moving block, grouped into an InstancedMesh per
+    // geometry the same way the solid blocks are. Only blocks that actually fly get one, so a
+    // machine whose blocks never move allocates nothing here.
+    const ghostByKey = new Map<number, AnimatedBlock[]>()
+    for (const a of animated) {
+      if (!a.flights.length) continue
+      const d = decodeState(blocks[a.blockIndex].state)
+      const key = toggleBaseKeyFor(d.blockId, d.meta)
+      const list = ghostByKey.get(key) ?? []
+      list.push(a)
+      ghostByKey.set(key, list)
+    }
+    for (const [key, list] of ghostByKey) {
+      const geo = assets ? assets.geo(key) : plainBox
+      const mat = (assets ? assets.material(key) : coloredMat(key)).clone()
+      mat.transparent = true
+      mat.opacity = GHOST_OPACITY
+      mat.depthWrite = false // so a ghost never occludes whatever is visible through it
+      ghostMats.push(mat)
+      const mesh = new THREE.InstancedMesh(geo, mat, list.length)
+      mesh.frustumCulled = false
+      mesh.renderOrder = 1 // after the opaque blocks, before the additive effect overlays (2)
+      list.forEach((a, i) => {
+        a.ghost = { mesh, instanceIndex: i }
+        // Start hidden - renderBlock turns each on only for the ticks its own flight covers.
+        applyInstanceTransform(a.ghost, a.renderPos, a.quat, false)
+      })
+      scene.add(mesh)
+      meshes.push(mesh)
+    }
 
     // Piston head extension - one small InstancedMesh sized to the piston count, sliding along
     // each piston's own facing between its body position (retracted) and body + facing (extended).
@@ -725,19 +809,26 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
     head.mesh.instanceMatrix.needsUpdate = true
   }
 
-  function renderBlock(block: AnimatedBlock, pos: THREE.Vector3) {
+  function renderBlock(block: AnimatedBlock, pos: THREE.Vector3, ph: { tick: number; order: number }) {
+    // In flight, the solid instance is scaled away and the half-transparent twin takes its place at
+    // the identical position/rotation, so a block visibly reads as "still travelling" for exactly
+    // the ticks the simulator actually had it in the air.
+    const flying = block.ghost !== null && isInFlight(block, ph.tick, ph.order)
     dummy.position.copy(pos)
     dummy.quaternion.copy(block.quat)
-    dummy.scale.set(1, 1, 1)
+    const s = flying ? 0 : 1
+    dummy.scale.set(s, s, s)
     dummy.updateMatrix()
     block.mesh.setMatrixAt(block.instanceIndex, dummy.matrix)
     block.mesh.instanceMatrix.needsUpdate = true
+    if (block.ghost) applyInstanceTransform(block.ghost, pos, block.quat, flying)
   }
 
   // Auto (looping) playback - unchanged wall-clock-driven hold-then-snap behavior.
   function stepAuto() {
     const t = currentTick()
-    for (const block of animated) renderBlock(block, positionAt(block.keyframes, t))
+    const ph = playhead()
+    for (const block of animated) renderBlock(block, positionAt(block.keyframes, t), ph)
     for (const head of heads) {
       renderHead(head, extensionBlendAt(head.keyframes, t), livePositionNow(head.blockIndex, head.bodyPos))
     }
@@ -748,12 +839,13 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
   function stepManual() {
     const now = performance.now()
     const frac = Math.min(1, (now - transitionStart) / MANUAL_STEP_MS)
+    const ph = playhead()
     for (const block of animated) {
       if (block.transTo !== null) {
         block.renderPos = frac >= 1 ? block.transTo : block.transFrom!.clone().lerp(block.transTo, frac)
         if (frac >= 1) { block.transFrom = null; block.transTo = null }
       }
-      renderBlock(block, block.renderPos)
+      renderBlock(block, block.renderPos, ph)
     }
     for (const head of heads) {
       if (head.transTo !== null) {

@@ -49,6 +49,10 @@ NODE_KINDS = {_NAME_TO_KIND[n] for n in (
     "PistonQueued", "PistonMoveExecuted", "PistonExtendBlocked", "PistonRetractBlocked",
     "ObserverFired", "ObserverActivated", "BlockPushed",
     "RedstoneActivatedPiston", "RedstoneDeactivatedPiston", "PistonNeighborNotified",
+    # The far end of a push: a block does not arrive when it leaves, and the arrival is what runs
+    # setBlockState/neighborChanged - so it is a real cause of everything that cascades from it,
+    # not bookkeeping. Showing it is what makes the delay between leaving and landing visible.
+    "BlockSettled", "MovingBlockDropped",
 )}
 
 KIND_COLORS = {
@@ -57,6 +61,8 @@ KIND_COLORS = {
     "PistonExtendBlocked": "#ff6b6b",
     "PistonRetractBlocked": "#ff6b6b",
     "BlockPushed": "#a8dadc",
+    "BlockSettled": "#76c7c0",       # same family as BlockPushed - the other end of the same move
+    "MovingBlockDropped": "#ff6b6b", # the block never arrived at all
     "PistonNeighborNotified": "#f3f3f3",
     "ObserverFired": "#ffd166",
     "ObserverActivated": "#ffe8a3",
@@ -92,6 +98,9 @@ def build_dot(data: bytes, name: str) -> str:
     last_piston_move: dict[int, int] = {}   # pistonSubject -> node idx of its last MoveExecuted
     last_observer_fire: dict[int, int] = {}  # observerSubject -> node idx of its last ObserverFired
     last_redstone_event: dict[int, int] = {}  # redstoneSubject -> node idx of its last (de)activate
+    # (pushGroupId, blockKey) -> node idx of the BlockPushed still awaiting its arrival. Keyed by
+    # both because one push group moves several blocks, each arriving as its own event.
+    last_push_of: dict[tuple[int, int], int] = {}
 
     lines = [
         "digraph simlog {",
@@ -124,6 +133,13 @@ def build_dot(data: bytes, name: str) -> str:
         if ev.kind == 15:  # PistonNeighborNotified: generic catch-all cause
             src_name = vsd.BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
             info_lines.append(f"from {vsd.unpack_pos(ev.actorKey)} (was {src_name})")
+        if ev.kind in (18, 19):  # BlockSettled / MovingBlockDropped
+            src_name = vsd.BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
+            cause = vsd.MOVING_END_CAUSE_NAMES.get(ev.movingEndCause, str(ev.movingEndCause))
+            info_lines.append(f"{src_name} -> {(ev.toX, ev.toY, ev.toZ)}")
+            # The whole point of showing these: how long the block was actually in the air. 2 is
+            # the normal case, less means a short piston pulse cut the flight short.
+            info_lines.append(f"flight {ev.executedTick - ev.scheduledTick}t ({cause})")
         # Two-column label: left = "subtick - tick" (the ordering key), right = what happened.
         # HTML-like label (the <...> form) so the two columns can sit in one bordered table.
         tick_cell = f"{ev.activationSubtick} - {ev.activationTick}"
@@ -138,6 +154,12 @@ def build_dot(data: bytes, name: str) -> str:
 
         if ev.kind == 2:  # BlockPushed: actorKey is the piston that pushed it
             src = last_piston_move.get(ev.actorKey)
+            if src is not None:
+                edges.add((src, i))
+            # Remember it so its own arrival below can point back at the departure it completes.
+            last_push_of[(ev.pushGroupId, ev.blockKey)] = i
+        elif ev.kind in (18, 19):  # BlockSettled / MovingBlockDropped: ends a specific push
+            src = last_push_of.pop((ev.pushGroupId, ev.blockKey), None)
             if src is not None:
                 edges.add((src, i))
         elif ev.kind == 4:  # ObserverActivated: same observer's ObserverFired is the cause
