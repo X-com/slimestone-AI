@@ -1920,6 +1920,10 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             ev.actualAmount = static_cast<std::uint8_t>(moveCount);
             ev.fromX = static_cast<std::int16_t>(source.x); ev.fromY = static_cast<std::int16_t>(source.y); ev.fromZ = static_cast<std::int16_t>(source.z);
             ev.toX = static_cast<std::int16_t>(target.x); ev.toY = static_cast<std::int16_t>(target.y); ev.toZ = static_cast<std::int16_t>(target.z);
+            // Raw carried block id - was only ever set on the SELF_ARM (head/retract) variants
+            // below, an oversight from when those were added; every BlockPushed should carry it
+            // per kind 2's own doc in sim_event_log.h. Found by the Java/C++ sim-log comparator.
+            ev.reserved0 = static_cast<std::uint8_t>(blockId(movedState) & 0xFF);
             // The flight's payload. Without it a reader joining the log mid-flight cannot know what
             // will land: the destination cell holds only the id-36 placeholder, whose meta encodes
             // the direction and nothing about the carried block. See kind 2's doc in sim_event_log.h.
