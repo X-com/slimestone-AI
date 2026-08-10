@@ -158,7 +158,17 @@ private:
     void addMovingBlock(const World::MovingBlock& block);
     void lampUpdateTick(BlockPos pos, std::uint32_t state);
     void logPoweredChanged(BlockPos pos, int rawBlockId, bool on);
-    void logBlockDestroyed(BlockPos pos, int rawBlockId);
+    void logBlockDestroyed(BlockPos pos, int rawBlockId, std::uint8_t cause);
+    // simulation_data: records a retract that bypasses doPistonMove (which is every retract except
+    // a sticky pull) - otherwise nothing in the log says the retract executed. See its definition.
+    void logPistonRetractExecuted(BlockPos pos, const Facing& facing);
+    // simulation_data: scheduleUpdate actually queued a tick (the success path - the collision path
+    // is ScheduledTickDropped). `order` is the ScheduledTick tiebreak that decides execution order
+    // among ticks due on the same game tick.
+    void logScheduledTickCreated(BlockPos pos, int blockIdValue, int delay, int order);
+    // simulation_data: a rail rewrote shape metadata (its own or a neighbour's) - not inferable, so
+    // the resulting state word is carried outright. See RailShapeChanged.
+    void logRailShapeChanged(BlockPos pos, std::uint32_t newState);
     // Shared emitter for both ends of a moving block's fate (BlockSettled / MovingBlockDropped) -
     // every settle and drop path routes through here so the record shape can't drift between them.
     void logMovingBlockEnded(const World::MovingBlock& moving, bool settled, std::uint8_t cause);

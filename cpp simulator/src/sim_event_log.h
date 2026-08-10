@@ -29,11 +29,18 @@ enum SimEventKind : std::uint8_t {
     RedstoneActivatedPiston = 7,   // redstone block (subject) powers targetKey piston
     RedstoneDeactivatedPiston = 8, // redstone block (subject) removal unpowers targetKey piston
     // SDL3 additions (appended, never renumbered):
-    PistonExtendBlocked = 9,       // piston (subject) wanted to extend but could not (see failureReason)
-    PistonRetractBlocked = 10,     // piston (subject) wanted to retract but could not
+    // NO LONGER EMITTED as of SDL8 - these were an exact verbatim copy of the PistonMoveExecuted
+    // record the blocked branch already pushes (same failureReason, same direction, only the kind
+    // differed), so they carried zero information. A blocked attempt is now exactly
+    // "PistonMoveExecuted with SEF_SUCCESS clear". The numbers stay reserved forever; never reuse.
+    PistonExtendBlocked = 9,
+    PistonRetractBlocked = 10,
     BlockLeftBehind = 11,          // sticky pull failed / block detached from its group (reserved, not yet emitted)
-    BlockDestroyed = 12,           // block (subject) removed from the world outside of a piston push -
-                                    // e.g. a rail losing its supporting block (railNeighborChanged)
+    // Block (subject) removed from the world without being carried anywhere - it simply stops
+    // existing. reserved1 carries an SED_* cause saying which rule removed it (SDL8; before that
+    // this kind only ever meant the rail case, which is now SED_RAIL_UNSUPPORTED = 0, so old
+    // readers that ignore reserved1 still read historical logs correctly).
+    BlockDestroyed = 12,
     ComponentSplit = 13,           // a connected group tore apart (reserved, not yet emitted)
     ObserverSuppressed = 14,       // observer fired but had no effect (reserved, not yet emitted)
     // piston (subject) was notified because SOME neighboring block changed (the generic mechanism
@@ -68,7 +75,46 @@ enum SimEventKind : std::uint8_t {
     BlockSettled = 18,
     //   MovingBlockDropped: the in-flight block was destroyed and never arrived at all.
     MovingBlockDropped = 19,
+    // SDL8 additions - the remaining state changes a replaying reader could not otherwise see.
+    // scheduleUpdate(pos, id, delay) actually queued a tick (the success path; the collision path
+    // is ScheduledTickDropped above, which is all that used to be logged). Needed because the
+    // pending-tick queue is live state that survives across ticks AND because due ticks fire in
+    // (time, order) order where `order` is a global counter assigned here at scheduling time -
+    // without it a reader cannot reproduce within-tick execution order of scheduled updates.
+    // reserved0 = the blockIdValue scheduled; attemptedAmount = the delay in ticks; reserved2 = the
+    // ScheduledTick.order tiebreak; executedTick = when it was queued, scheduledTick = when it is
+    // due (queued + delay).
+    ScheduledTickCreated = 20,
+    // A rail rewrote its own or a neighbouring rail's SHAPE metadata (Rail.place/railConnectTo).
+    // Unlike every other state change this one is not inferable: it runs vanilla's full shape
+    // selection, including the powered-hint corner tiebreak, against the live neighbourhood. So the
+    // resulting state is carried outright - reserved2 = the full new raw state word (type|meta),
+    // reserved0 = the raw block id. Fires recursively from inside setBlockState on every rail
+    // settle, so any rail-bearing machine depends on it to stay in sync.
+    RailShapeChanged = 21,
+    // SDL9: the replication backstop. Emitted from inside setBlockState for EVERY world write that
+    // actually changes something, whatever rule caused it. This makes the log replay-complete by
+    // construction rather than by enumeration: setBlockState is a provable choke point (the only
+    // writes that bypass it are the t=0 bulk load, which the InitialBlockState section covers, and
+    // piston.cpp's pistonDoMove, reachable only from the debugPistonMove JSON entry point and never
+    // during a logged run). So world state at any point == InitialBlockState with every
+    // BlockStateChanged up to that globalSeq applied in order - no rule needs re-implementing and
+    // no future rule can silently escape the log.
+    //   targetKey = the OLD raw state word, reserved2 = the NEW one (both type|meta, so a reader
+    //   applies reserved2 directly and can diff against targetKey). attemptedAmount = the caller's
+    //   `flags` argument, which decides the neighbour/observer cascade that follows.
+    // Every other kind remains: they say WHY a change happened, which this deliberately does not.
+    BlockStateChanged = 22,
 };
+
+// SimEvent.reserved1 on BlockDestroyed: which rule removed the block. Several of these are
+// cascading deletions triggered from inside setBlockState by an unrelated write elsewhere, which is
+// exactly why they need to be stated rather than inferred.
+constexpr std::uint8_t SED_RAIL_UNSUPPORTED   = 0; // rail lost its supporting block (railNeighborChanged)
+constexpr std::uint8_t SED_PUSH_DESTROYED     = 1; // PushReaction::Destroy block popped by a piston push
+constexpr std::uint8_t SED_ORPHAN_HEAD        = 2; // piston head whose base is no longer a piston
+constexpr std::uint8_t SED_ORPHAN_PISTON_BASE = 3; // extended piston base whose head got replaced
+constexpr std::uint8_t SED_HEAD_RETRACTED     = 4; // head removed because its piston retracted
 
 // SimEvent.reserved1 on BlockSettled/MovingBlockDropped: which path ended the flight. This is not
 // cosmetic - SEM_SETTLE_SCHEDULED runs in the tick's entity phase (updateEntities) while the two
@@ -271,10 +317,15 @@ struct RunSummary {
 // Bumped SDL6->SDL7 for the BlockSettled/MovingBlockDropped kinds + the SEM_* cause byte now
 // carried in reserved1 - no new fields again (both reuse existing SimEvent slots), but an SDL6
 // reader would read reserved1 as always-zero padding and silently mistake every early/cancelled
-// settle for a normal scheduled one.
+// settle for a normal scheduled one. Bumped SDL7->SDL8 for the replication-completeness pass:
+// ScheduledTickCreated/RailShapeChanged kinds, the SED_* cause byte on BlockDestroyed (which also
+// widens that kind to cover push-destroy and cascading orphan deletions), from/to now populated on
+// ObserverFired/ObserverActivated/PistonQueued, and Piston*Blocked no longer emitted. Same
+// reasoning as before: no field moved, but the meaning of existing bytes changed underfoot.
+// Bumped SDL8->SDL9 for BlockStateChanged, which makes the log replay-complete.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '7'};
-    std::uint32_t formatVersion = 7;
+    char          magic[4] = {'S', 'D', 'L', '9'};
+    std::uint32_t formatVersion = 9;
     std::uint64_t simulatorBuildHash = 0;
     std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;

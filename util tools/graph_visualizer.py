@@ -46,7 +46,7 @@ DEFAULT_FIXTURE_DIR = REPO / "flying machines" / "graph-json"
 # skipped as a node but its causal effect (e.g. RedstoneActivatedPiston) still gets drawn.
 _NAME_TO_KIND = {v: k for k, v in vsd.KIND_NAMES.items()}
 NODE_KINDS = {_NAME_TO_KIND[n] for n in (
-    "PistonQueued", "PistonMoveExecuted", "PistonExtendBlocked", "PistonRetractBlocked",
+    "PistonQueued", "PistonMoveExecuted",
     "ObserverFired", "ObserverActivated", "BlockPushed",
     "RedstoneActivatedPiston", "RedstoneDeactivatedPiston", "PistonNeighborNotified",
     # The far end of a push: a block does not arrive when it leaves, and the arrival is what runs
@@ -58,8 +58,6 @@ NODE_KINDS = {_NAME_TO_KIND[n] for n in (
 KIND_COLORS = {
     "PistonQueued": "#cfe8ff",
     "PistonMoveExecuted": "#8ecae6",
-    "PistonExtendBlocked": "#ff6b6b",
-    "PistonRetractBlocked": "#ff6b6b",
     "BlockPushed": "#a8dadc",
     "BlockSettled": "#76c7c0",       # same family as BlockPushed - the other end of the same move
     "MovingBlockDropped": "#ff6b6b", # the block never arrived at all
@@ -123,7 +121,7 @@ def build_dot(data: bytes, name: str) -> str:
         color = KIND_COLORS.get(kind_name, "#dddddd")
         pos = vsd.unpack_pos(ev.blockKey)
         info_lines = [f"{kind_name}", f"{pos}"]
-        if ev.kind in (1, 9, 10):  # PistonMoveExecuted / *Blocked
+        if ev.kind == 1:  # PistonMoveExecuted (SEF_SUCCESS clear = a blocked attempt)
             status = "moved" if ev.flags & vsd.SEF_SUCCESS else "BLOCKED"
             info_lines.append(status)
             if ev.failureReason:

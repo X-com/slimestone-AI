@@ -377,10 +377,94 @@ void Simulator::logMovingBlockEnded(const World::MovingBlock& moving, bool settl
     eventLog_->push(ev);
 }
 
-// simulation_data: a block vanished from the world outside of a piston push - currently only a
-// rail losing its supporting block (railNeighborChanged). Without this the visualizer has no
-// signal that the block is gone and keeps rendering it forever at its original spot.
-void Simulator::logBlockDestroyed(BlockPos pos, int rawBlockId) {
+// simulation_data: a rail rewrote shape metadata (its own in railPlace, or a neighbour's in
+// railConnectTo). Alone among the state changes here this is NOT inferable - it runs vanilla's full
+// shape selection, including the powered-hint corner tiebreak, against the live neighbourhood - so
+// the resulting state word is carried outright in reserved2 for a reader to apply directly. Fires
+// recursively from inside setBlockState on every rail settle, so rail machines depend on it.
+void Simulator::logRailShapeChanged(BlockPos pos, std::uint32_t newState) {
+    if (eventLog_ == nullptr) {
+        return;
+    }
+    SimEvent ev;
+    ev.blockKey = ev.actorKey = stableKey(pos);
+    ev.kind = RailShapeChanged;
+    ev.reserved0 = static_cast<std::uint8_t>(blockId(newState) & 0xFF);
+    ev.reserved2 = newState;
+    std::uint32_t order = eventLog_->nextOrder();
+    ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+    ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+    ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+    ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+    ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+    eventLog_->push(ev);
+}
+
+// simulation_data: a tick was actually queued (the success path of scheduleUpdate; the collision
+// path is ScheduledTickDropped). The pending queue is live state that survives across ticks, and
+// due ticks fire ordered by (time, order) with `order` assigned here - so without this a reader can
+// neither know what is pending nor reproduce within-tick ordering of scheduled updates.
+void Simulator::logScheduledTickCreated(BlockPos pos, int blockIdValue, int delay, int order) {
+    if (eventLog_ == nullptr) {
+        return;
+    }
+    SimEvent ev;
+    ev.blockKey = ev.actorKey = stableKey(pos);
+    ev.kind = ScheduledTickCreated;
+    ev.reserved0 = static_cast<std::uint8_t>(blockIdValue & 0xFF);
+    ev.attemptedAmount = static_cast<std::uint8_t>(delay & 0xFF);
+    ev.reserved2 = static_cast<std::uint32_t>(order);
+    std::uint32_t seq = eventLog_->nextOrder();
+    // executed = queued now; scheduled = when it comes due. Same convention as the piston
+    // queue->execute pair, so "scheduled minus executed" reads as the delay everywhere.
+    ev.activationTick = ev.executedTick = world_.time;
+    ev.scheduledTick = world_.time + delay;
+    ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = seq;
+    ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+    ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+    ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+    eventLog_->push(ev);
+}
+
+// simulation_data: a retract that never reaches doPistonMove (a non-sticky piston, or a sticky one
+// with nothing legal to pull) still really executed - the head comes off and the base cell becomes
+// a moving placeholder until it settles back. doPistonMove is the only other emitter of
+// PistonMoveExecuted, so without this the overwhelming majority of retracts leave no record that
+// they happened at all: no direction, no success, nothing to anchor the head removal against.
+// pushGroupId stays 0 - nothing was pushed, so there is no group.
+void Simulator::logPistonRetractExecuted(BlockPos pos, const Facing& facing) {
+    if (eventLog_ == nullptr) {
+        return;
+    }
+    BlockPos front = offset(pos, facing);
+    std::uint64_t subject = stableKey(pos);
+    QueueInfo queued = eventLog_->takeQueued(packPos(pos), /*extend*/ false);
+    SimEvent ev;
+    ev.blockKey = ev.actorKey = subject;
+    ev.kind = PistonMoveExecuted;
+    ev.direction = static_cast<std::uint8_t>(facing.index);
+    ev.flags = SEF_SUCCESS;  // SEF_EXTEND clear = retract
+    std::uint32_t order = eventLog_->nextOrder();
+    ev.activationTick = ev.executedTick = world_.time;
+    ev.activationSubtick = ev.executedSubtick = order;
+    ev.globalSeq = order;
+    ev.scheduledTick = queued.found ? queued.tick : world_.time;
+    ev.scheduledSubtick = queued.found ? queued.subtick : order;
+    ev.fromX = static_cast<std::int16_t>(pos.x);
+    ev.fromY = static_cast<std::int16_t>(pos.y);
+    ev.fromZ = static_cast<std::int16_t>(pos.z);
+    ev.toX = static_cast<std::int16_t>(front.x);
+    ev.toY = static_cast<std::int16_t>(front.y);
+    ev.toZ = static_cast<std::int16_t>(front.z);
+    eventLog_->push(ev);
+}
+
+// simulation_data: a block vanished from the world without being carried anywhere - it simply
+// stops existing. `cause` (an SED_* value) says which rule removed it: a rail losing its support,
+// a PushReaction::Destroy block popped by a push, or one of the cascading orphan deletions that
+// fire from inside setBlockState. Several of those are triggered by an unrelated write somewhere
+// else entirely, which is exactly why a reader cannot infer them and they have to be stated.
+void Simulator::logBlockDestroyed(BlockPos pos, int rawBlockId, std::uint8_t cause) {
     if (eventLog_ == nullptr) {
         return;
     }
@@ -388,6 +472,7 @@ void Simulator::logBlockDestroyed(BlockPos pos, int rawBlockId) {
     ev.blockKey = ev.actorKey = stableKey(pos);
     ev.kind = BlockDestroyed;
     ev.reserved0 = static_cast<std::uint8_t>(rawBlockId & 0xFF);
+    ev.reserved1 = cause;
     std::uint32_t order = eventLog_->nextOrder();
     ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
     ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
@@ -436,6 +521,12 @@ void Simulator::observerUpdateTick(BlockPos pos, std::uint32_t state) {
         std::uint32_t order = eventLog_->nextOrder();
         ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
         ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        // blockKey is the observer's ORIGINAL spawn cell, so on a flying machine it says nothing
+        // about where this pulse actually happened - state the live position outright rather than
+        // making every reader replay the push history just to locate the event.
+        ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+        ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+        ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
         eventLog_->push(ev);
         logObserverActivations(pos, state, turningOn);
     }
@@ -583,6 +674,7 @@ void Simulator::scheduleUpdate(BlockPos pos, int blockIdValue, int delay) {
     tick.pos = pos;
     tick.blockId = blockIdValue;
     world_.scheduledTicks.push_back(tick);
+    logScheduledTickCreated(pos, blockIdValue, delay, tick.order);
 }
 
 bool Simulator::isUpdateScheduled(BlockPos pos, int blockIdValue) const {
@@ -619,6 +711,10 @@ void Simulator::neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceB
         BlockPos base = offset(pos, opposite(facing));
         int baseId = blockId(world_.getBlock(base));
         if (baseId != BLOCK_PISTON && baseId != BLOCK_STICKY_PISTON) {
+            // Orphaned head: its base stopped being a piston, so the head deletes itself. Triggered
+            // by whatever changed the base, which may be an entirely unrelated write - a reader
+            // could only get this by re-implementing the rule, so state it.
+            logBlockDestroyed(pos, BLOCK_PISTON_HEAD, SED_ORPHAN_HEAD);
             setBlockToAir(pos);
         } else {
             neighborChanged(base, sourceBlockId, fromPos);
@@ -803,6 +899,11 @@ void Simulator::logPistonQueued(BlockPos pistonPos, int direction, bool extend) 
     ev.activationSubtick = order;
     ev.scheduledSubtick = order;
     ev.executedSubtick = order;
+    // Live position - blockKey is the piston's original spawn cell, which a moving piston has long
+    // since left (see the same note on ObserverFired).
+    ev.fromX = ev.toX = static_cast<std::int16_t>(pistonPos.x);
+    ev.fromY = ev.toY = static_cast<std::int16_t>(pistonPos.y);
+    ev.fromZ = ev.toZ = static_cast<std::int16_t>(pistonPos.z);
     eventLog_->push(ev);
 }
 
@@ -827,6 +928,14 @@ void Simulator::logObserverActivations(BlockPos observerPos, std::uint32_t state
         std::uint32_t order = eventLog_->nextOrder();
         ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
         ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        // from = the observer that pulsed, to = the block it reached. Both live positions: neither
+        // observerKey nor targetKey locates them once the machine has moved.
+        ev.fromX = static_cast<std::int16_t>(observerPos.x);
+        ev.fromY = static_cast<std::int16_t>(observerPos.y);
+        ev.fromZ = static_cast<std::int16_t>(observerPos.z);
+        ev.toX = static_cast<std::int16_t>(target.x);
+        ev.toY = static_cast<std::int16_t>(target.y);
+        ev.toZ = static_cast<std::int16_t>(target.z);
         eventLog_->push(ev);
     };
     consider(front);
@@ -1091,7 +1200,7 @@ void Simulator::railNeighborChanged(BlockPos pos, std::uint32_t state) {
 
     if (unsupported) {
         if (!isAirState(world_.getBlock(pos))) {
-            logBlockDestroyed(pos, id);
+            logBlockDestroyed(pos, id, SED_RAIL_UNSUPPORTED);
             setBlockToAir(pos);
         }
         return;
@@ -1376,6 +1485,7 @@ void Simulator::railConnectTo(BlockPos ownPos, const BlockPos existingConn[], in
     int id = blockId(state);
     int mask = (id == BLOCK_RAIL) ? 0xF : 0x7;
     std::uint32_t newState = makeState(id, (blockMeta(state) & ~mask) | dir);
+    logRailShapeChanged(ownPos, newState);
     setBlockState(ownPos, newState, 3);
 }
 
@@ -1425,6 +1535,7 @@ void Simulator::railPlace(BlockPos pos, bool poweredHint) {
     std::uint32_t newState = makeState(id, (blockMeta(state) & ~mask) | dir);
     // onBlockAdded always calls updateDir with initialPlacement=true (its only call site), so
     // unlike vanilla's general Rail.place() this always writes and always cascades.
+    logRailShapeChanged(pos, newState);
     setBlockState(pos, newState, 3);
 
     BlockPos conn[2]; int count;
@@ -1516,6 +1627,10 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
             addMovingBlock(retractArm);
         }
 
+        // Whether the retract went through doPistonMove, which emits its own PistonMoveExecuted.
+        // Only a sticky piston with a legal block to pull ever gets there - every other retract
+        // would otherwise leave no record at all that it executed (see the emit below).
+        bool loggedByPistonMove = false;
         if (sticky) {
             BlockPos pull = offset(pos, facing, 2);
             std::uint32_t pullState = world_.getBlock(pull);
@@ -1535,9 +1650,22 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
                 // spent only after this call, not before (see the structuralVerifyEnabled_ block
                 // below, shared by both the sticky and non-sticky paths).
                 doPistonMove(pos, facing, false, sticky);
+                loggedByPistonMove = true;
             }
         } else {
+            if (blockId(world_.getBlock(front)) == BLOCK_PISTON_HEAD) {
+                logBlockDestroyed(front, BLOCK_PISTON_HEAD, SED_HEAD_RETRACTED);
+            }
             setBlockToAir(front);
+        }
+
+        if (!loggedByPistonMove) {
+            // The retract really did execute, but nothing above said so: doPistonMove is the only
+            // emitter of PistonMoveExecuted and it was never called. Emitted here rather than at
+            // the top of the branch because whether doPistonMove runs is only known now, and
+            // emitting unconditionally would double-count the sticky-pull case (same kind, same
+            // piston, same tick). executedSubtick still orders it correctly against everything else.
+            logPistonRetractExecuted(pos, facing);
         }
 
         if (structuralVerifyEnabled_) {
@@ -1560,7 +1688,13 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
     QueueInfo queued = (eventLog_ != nullptr) ? eventLog_->takeQueued(pistonKey, extending) : QueueInfo{};
 
     if (!extending) {
-        setBlockToAir(offset(pos, direction));
+        // Head comes off before the pull helper inspects the board. Same silent removal as the
+        // non-sticky branch in pistonEventReceived - logged for the same reason.
+        BlockPos headPos = offset(pos, direction);
+        if (blockId(world_.getBlock(headPos)) == BLOCK_PISTON_HEAD) {
+            logBlockDestroyed(headPos, BLOCK_PISTON_HEAD, SED_HEAD_RETRACTED);
+        }
+        setBlockToAir(headPos);
     }
 
     PistonStructureHelper helper(world_, pos, direction, extending);
@@ -1586,12 +1720,10 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             ev.scheduledTick = queued.found ? queued.tick : world_.time;
             ev.scheduledSubtick = queued.found ? queued.subtick : order;
             eventLog_->push(ev);
-
-            // Emit the failure as its own legible kind (highest training value per SDL3 spec).
-            SimEvent fail = ev;
-            fail.kind = extending ? PistonExtendBlocked : PistonRetractBlocked;
-            fail.globalSeq = fail.activationSubtick = fail.executedSubtick = eventLog_->nextOrder();
-            eventLog_->push(fail);
+            // No separate PistonExtendBlocked/PistonRetractBlocked record: it used to be a verbatim
+            // copy of the event just pushed, differing only in `kind`, so it said nothing the
+            // SEF_SUCCESS-clear flag and failureReason above don't already say (see their doc in
+            // sim_event_log.h). A blocked attempt is now exactly one record.
 
             // Failed push-group record with full would-be membership - the informative case.
             std::vector<std::uint64_t> members;
@@ -1599,8 +1731,8 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             for (int i = 0; i < helper.moveCount(); ++i) {
                 members.push_back(stableKey(helper.moveAt(i)));
             }
-            eventLog_->addPushGroup(fail.globalSeq, pistonSubject, static_cast<std::int32_t>(world_.time),
-                                    static_cast<std::uint16_t>(fail.globalSeq & 0xFFFF),
+            eventLog_->addPushGroup(ev.globalSeq, pistonSubject, static_cast<std::int32_t>(world_.time),
+                                    static_cast<std::uint16_t>(ev.globalSeq & 0xFFFF),
                                     static_cast<std::uint8_t>(direction.index), /*succeeded*/ false,
                                     failReason, static_cast<std::uint32_t>(attempted), members);
         }
@@ -1676,6 +1808,11 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
 
     const Facing& moveFacing = extending ? direction : opposite(direction);
     for (int i = destroyCount - 1; i >= 0; --i) {
+        // PushReaction::Destroy blocks (torches, dust, plants...) are popped rather than moved, and
+        // this is their only trace: they are not in the push group's member list either, which is
+        // built from moveAt() alone. Logged before the write so it precedes the resulting cascade.
+        logBlockDestroyed(helper.destroyAt(i),
+                          blockId(destroyedStates[static_cast<std::size_t>(i)]), SED_PUSH_DESTROYED);
         setBlockState(helper.destroyAt(i), 0, 4);
         aiblockstate[static_cast<std::size_t>(--k)] = destroyedStates[static_cast<std::size_t>(i)];
     }
@@ -1857,6 +1994,27 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
         return;
     }
 
+    // The replication backstop - see BlockStateChanged. Emitted here, before any of the hooks and
+    // cascades below, so it precedes every event those produce and a reader applying changes in
+    // globalSeq order reproduces the world exactly. Placed after the oldState == state early-out
+    // above on purpose: a write that changes nothing has no side effects and is not a state change.
+    if (eventLog_ != nullptr) {
+        SimEvent ev;
+        ev.blockKey = ev.actorKey = stableKey(pos);
+        ev.targetKey = oldState;
+        ev.reserved2 = state;
+        ev.kind = BlockStateChanged;
+        ev.reserved0 = static_cast<std::uint8_t>(blockId(state) & 0xFF);
+        ev.attemptedAmount = static_cast<std::uint8_t>(flags & 0xFF);
+        std::uint32_t order = eventLog_->nextOrder();
+        ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+        ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+        ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+        ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+        eventLog_->push(ev);
+    }
+
     // --- Incremental block-hash cache maintenance ---
     if (!bhc_.dirty) {
         bool removing = (state == 0);
@@ -1955,6 +2113,10 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
         std::uint32_t baseState = world_.getBlock(base);
         int baseId = blockId(baseState);
         if ((baseId == BLOCK_PISTON || baseId == BLOCK_STICKY_PISTON) && metaBit(baseState, 3)) {
+            // The inverse orphan rule: replacing an extended piston's head kills the base too. This
+            // fires from inside setBlockState, i.e. as a side effect of some other write, so it is
+            // invisible to a reader unless logged here.
+            logBlockDestroyed(base, baseId, SED_ORPHAN_PISTON_BASE);
             setBlockToAir(base);
         }
     }

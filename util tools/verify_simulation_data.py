@@ -29,7 +29,7 @@ On-disk layout (must stay in sync with cpp simulator/src/sim_event_log.h):
                             actually fire during the observed run, unlike the dynamic section above
     static push members   : flat uint64 array for the section above, indexed the same way, but a
                             SEPARATE array from the dynamic push-group members
-    footer                : 188 bytes, magic "SDL7", offsets/counts for every section above
+    footer                : 188 bytes, magic "SDL9", offsets/counts for every section above
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ _INITIAL = struct.Struct("<QhhhHBBBBhBBII")             # 32 bytes
 _COMPONENT = struct.Struct("<hBBIhhhhhhIQ")             # 32 bytes
 _SUMMARY = struct.Struct("<BBbBii" + "h" * 12 + "I" * 7)  # 64 bytes
 _WOULDPOWER = struct.Struct("<QQB7x")                   # 24 bytes (7x = 7 pad bytes)
-_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDL7)
+_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDL9)
 assert _EVENT.size == 96, _EVENT.size
 assert _INDEX.size == 32, _INDEX.size
 assert _PUSHGROUP.size == 48, _PUSHGROUP.size
@@ -76,6 +76,13 @@ KIND_NAMES = {
     12: "BlockDestroyed", 13: "ComponentSplit", 14: "ObserverSuppressed",
     15: "PistonNeighborNotified", 16: "ScheduledTickDropped", 17: "BlockPoweredChanged",
     18: "BlockSettled", 19: "MovingBlockDropped",
+    20: "ScheduledTickCreated", 21: "RailShapeChanged", 22: "BlockStateChanged",
+}
+# SimEvent.reserved1 on BlockDestroyed - which rule removed the block. Several are
+# cascading deletions fired from inside setBlockState by an unrelated write elsewhere.
+DESTROY_CAUSE_NAMES = {
+    0: "rail-unsupported", 1: "push-destroyed", 2: "orphan-head",
+    3: "orphan-piston-base", 4: "head-retracted",
 }
 # SimEvent.reserved1 on BlockSettled/MovingBlockDropped - how the block's flight ended.
 MOVING_END_CAUSE_NAMES = {
@@ -125,17 +132,20 @@ class SimEvent:
                  "scheduledTick", "executedTick", "activationSubtick", "scheduledSubtick",
                  "executedSubtick", "pushGroupId", "fromX", "fromY", "fromZ", "toX", "toY", "toZ",
                  "kind", "direction", "flags", "attemptedAmount", "actualAmount", "failureReason",
-                 "neighborSourceBlockId", "movingEndCause")
+                 "neighborSourceBlockId", "movingEndCause", "extraWord")
 
     def __init__(self, raw: tuple):
-        # neighborSourceBlockId / movingEndCause are reserved0 / reserved1 - both are generic
-        # slots named here for their only current use (see sim_event_log.h).
+        # neighborSourceBlockId / movingEndCause / extraWord are reserved0 / reserved1 / reserved2 -
+        # generic slots, named here for their current uses (see sim_event_log.h). movingEndCause is
+        # the SEM_* cause on BlockSettled/MovingBlockDropped and the SED_* cause on BlockDestroyed;
+        # extraWord is the new raw state on RailShapeChanged and the tick order on
+        # ScheduledTickCreated. Zero on every other kind.
         (self.blockKey, self.actorKey, self.targetKey, self.globalSeq, self.activationTick,
          self.scheduledTick, self.executedTick, self.activationSubtick, self.scheduledSubtick,
          self.executedSubtick, self.pushGroupId, self.fromX, self.fromY, self.fromZ, self.toX,
          self.toY, self.toZ, self.kind, self.direction, self.flags, self.attemptedAmount,
          self.actualAmount, self.failureReason, self.neighborSourceBlockId,
-         self.movingEndCause, _r2) = raw
+         self.movingEndCause, self.extraWord) = raw
 
 
 class BlockIndexEntry:
@@ -210,8 +220,8 @@ def read_footer(data: bytes) -> dict:
      static_push_group_off, static_push_group_count, static_push_member_count,
      static_push_member_off, _r) = \
         _FOOTER.unpack_from(data, len(data) - _FOOTER.size)
-    if magic != b"SDL7":
-        raise ValueError(f"bad magic {magic!r} (expected SDL7)")
+    if magic != b"SDL9":
+        raise ValueError(f"bad magic {magic!r} (expected SDL9)")
     if ev_sz != _EVENT.size or blk_sz != _INDEX.size:
         raise ValueError(f"record size mismatch ev={ev_sz} blk={blk_sz}")
     return {
@@ -336,6 +346,27 @@ def _fmt_event(ev: SimEvent) -> str:
         parts.append(f"cause={cause}")
         if ev.pushGroupId:
             parts.append(f"grp={ev.pushGroupId}")
+    elif ev.kind == 12:  # BlockDestroyed
+        src_name = BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
+        cause = DESTROY_CAUSE_NAMES.get(ev.movingEndCause, str(ev.movingEndCause))
+        parts.append(f"{src_name} at ({ev.fromX}, {ev.fromY}, {ev.fromZ})")
+        parts.append(f"cause={cause}")
+    elif ev.kind == 20:  # ScheduledTickCreated
+        src_name = BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
+        parts.append(f"{src_name} at ({ev.fromX}, {ev.fromY}, {ev.fromZ})")
+        parts.append(f"due t={ev.scheduledTick} (+{ev.attemptedAmount}t)")
+        parts.append(f"order={ev.extraWord}")
+    elif ev.kind == 22:  # BlockStateChanged - the replay backstop
+        old_id, new_id = ev.targetKey & 0xFF, ev.extraWord & 0xFF
+        old_name = BLOCK_NAMES.get(old_id, f"id{old_id}")
+        new_name = BLOCK_NAMES.get(new_id, f"id{new_id}")
+        parts.append(f"({ev.fromX}, {ev.fromY}, {ev.fromZ})")
+        parts.append(f"{old_name}:{ev.targetKey >> 8} -> {new_name}:{ev.extraWord >> 8}")
+        parts.append(f"flags={ev.attemptedAmount}")
+    elif ev.kind == 21:  # RailShapeChanged
+        src_name = BLOCK_NAMES.get(ev.neighborSourceBlockId, f"id{ev.neighborSourceBlockId}")
+        parts.append(f"{src_name} at ({ev.fromX}, {ev.fromY}, {ev.fromZ})")
+        parts.append(f"shape meta={ev.extraWord >> 8}")
     return "  " + " ".join(parts)
 
 
@@ -487,7 +518,7 @@ def _self_check() -> None:
     body += _PUSHGROUP.pack(0, kB, 0, 0, 0, 1, 0, 0, 0, 0, len(static_members), 0, 2, 0)
 
     footer = _FOOTER.pack(
-        b"SDL7", 7, 0, 0, 3, idx_off, 2, 96, 32,
+        b"SDL9", 9, 0, 0, 3, idx_off, 2, 96, 32,
         pg_rec_off, 1, 48,
         pg_off, len(push_members), 0,
         initial_off, 1, 32,
