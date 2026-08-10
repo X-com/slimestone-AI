@@ -203,16 +203,25 @@ model emitted, without re-implementing simulator rules. "Shadowed" (same tick+po
 specific event) was measured as 100% for kind 22's *locator* fields in a prior pass over this
 format; re-affirmed here, not re-measured, since no code affecting that changed since.
 
-### Confirmed redundant (locator only, not the payload)
+### Confirmed redundant (locator only, not the payload) — CORRECTED
 
-**BlockStateChanged's `from/to`, tick/subtick fields, `blockKey`, and `targetKey` (old state)** are
-100% shadowed by a semantic event (`PistonMoveExecuted`, `BlockPushed`, `ObserverFired`,
-`RedstoneBlock*`, `BlockDestroyed`, `BlockPoweredChanged`, `BlockSettled`, `RailShapeChanged`) at
-the same `(tick, position)` — measured 100.0% on movableRCA/tank/1-wide with rails in the prior
-pass. `reserved2` (the new state) is **not** redundant — deriving it means re-implementing rail
-shape selection, meta-bit rules, etc. This is the compaction opportunity flagged before: a compact
-`(globalSeq, newState, flags)` section could replace the 96-byte record for this kind alone,
-cutting roughly a third of total log volume. Not yet implemented.
+**Earlier claim in this file overstated this.** "100% shadowed at the same `(tick, position)`" is
+true but was written up as if `(tick, position)` uniquely identifies *which* write a semantic event
+explains. It doesn't: measured directly, 20.8–34.5% of `BlockStateChanged` writes share a
+`(tick, position)` with at least one other write to the same cell in the same tick (movableRCA
+20.8%, tank 34.5%, 1-wide with rails 28.9%; up to 5 writes to one cell in one tick). So dropping
+`from`/`to` entirely and relying on "the co-located semantic event tells you where it happened" is
+wrong precisely where multiple writes collide — there is no way to tell which write the semantic
+event's position refers to.
+
+**Corrected scope of the compaction:** `tick`/`subtick` fields ARE still droppable (recoverable
+from `globalSeq` plus a tick-boundary index — see `util tools/simlog_ticks.py`, added when this was
+caught) and `targetKey` (old state) is still droppable (it's the replayed board — proven by
+`util tools/check_log_completeness.py`'s REPLAY check, 557,363/557,363). **Position (`from`/`to`)
+must stay.** So the compact record is `(globalSeq, position, newState, flags)`, not
+`(globalSeq, newState, flags)` — roughly 15–20 bytes against the current 96, ~80–84% off this kind,
+not the ~94% implied by the original wording. Still the single largest lever in the format; just
+smaller than first stated. Not yet implemented.
 
 ### Confirmed NOT redundant, despite superficial appearance
 
@@ -257,11 +266,12 @@ redundancy analysis on top of that verified state.
 
 ## Recommended next step, if pursued
 
-Only one item rises to "worth doing": **the kind-22 compact section** (drop the shadowed locator
-fields, keep only `globalSeq`/`newState`/`flags` for `BlockStateChanged`). It's the single largest
-lever — roughly a third of every log — and every other candidate above is either already justified
-to keep (15, 0, 18, 21) or a small, judgement-call trim (4/7/8, 5/6) that trades supervision
-richness for a few percent of file size.
+Only one item rises to "worth doing": **the kind-22 compact section** — `(globalSeq, position,
+newState, flags)`, NOT `(globalSeq, newState, flags)` (see the correction above: position cannot be
+dropped, 20.8–34.5% of writes collide on `(tick, position)`). It's still the single largest lever —
+roughly 80–84% off this kind, ~30% of total log volume — and every other candidate above is either
+already justified to keep (15, 0, 18, 21) or a small, judgement-call trim (4/7/8, 5/6) that trades
+supervision richness for a few percent of file size.
 
 ### Files referenced
 - `cpp simulator/src/sim_event_log.h` — kind/flag/struct definitions, all descriptions above
@@ -269,3 +279,38 @@ richness for a few percent of file size.
 - `util tools/verify_simulation_data.py` — decoder mirror (`KIND_NAMES`, flag constants)
 - `util tools/check_log_completeness.py` — the REPLAY/RESUME harness used to confirm no
   regression while gathering these counts
+
+---
+
+## Update: tick-chunked data layer implemented
+
+Following this catalogue, a per-tick recurrent training data layer was built (the "auto-recursion
+over a full tick" design) to make training on these logs tractable — full-run attention was
+infeasible (`1-wide with rails` is 1,014,080 events) and the existing whole-board model couldn't
+even encode 21 of 55 fixtures (dense `[5,N,N]` relation tensor, up to 71 GB on the largest
+fixture). New/changed:
+
+- `transformer gym/transformer_gym/encode.py` — relations are now a sparse edge list
+  (`rel_edges: [3,E]`), not a dense matrix; `build_graph()` factored out as the shared static-node
+  builder. All 55 fixtures now encode (was 34/55).
+- `transformer gym/transformer_gym/model.py` — edge-restricted attention replacing dense
+  relation-biased global attention. A real semantic change (a node can no longer attend anywhere),
+  not just a memory optimization — needs a before/after accuracy check once trainable (not run in
+  this environment: no PyTorch installed here, syntax-checked only).
+- `util tools/simlog_ticks.py` — chronological, tick-grouped event reader (k-way merge across the
+  format's block-major on-disk layout).
+- `transformer gym/transformer_gym/state.py` — `SimState`/`apply_tick`: the per-tick "sufficient
+  statistic" (board + in-flight blocks + both queues) an autoregressive model would condition on.
+  Verified against ground truth at **every tick boundary** of all 9 fixtures (4,106 tick checks,
+  100% match) by `util tools/check_state_builder.py`.
+- `transformer gym/transformer_gym/dataset.py` — sparse-edge `collate()`; new `TickChunkDataset`.
+
+One design assumption was caught and corrected by that verification: `pending_block_events` was
+assumed to always empty out within the tick it was queued (checkForMove and
+sendQueuedBlockEvents both run inside one tickWorld() call). Measured false — `movableRCA` ends
+with 5 entries that were queued once and never resolved, because a queued move can be silently
+rejected with no event logged (the pre-existing "block-event rejection is unlogged" gap). The field
+is documented as a conservative over-approximation now, not an exact queue state.
+
+Model/training code (causal event-sequence model, teacher-forcing curriculum, rollout eval) was
+deliberately left unbuilt — data layer only, confirmed scope.

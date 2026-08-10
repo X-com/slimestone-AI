@@ -45,6 +45,7 @@ from verify_simulation_data import (  # noqa: E402
     run_fixture,
     unpack_pos,
 )
+from simlog_ticks import iter_events_chronological, iter_ticks  # noqa: E402
 
 __all__ = [
     "BLOCK_NAMES", "CAUSE_NAMES", "DIR_NAMES", "FAILURE_REASON_NAMES", "KIND_NAMES",
@@ -55,4 +56,5 @@ __all__ = [
     "read_footer", "read_initial_state", "read_push_groups", "read_push_members",
     "read_static_push_members", "read_static_push_preview", "read_summary",
     "read_would_power", "run_fixture", "unpack_pos",
+    "iter_events_chronological", "iter_ticks",
 ]
