@@ -1,0 +1,271 @@
+# SDL10 sim-log event catalogue + redundancy pass
+
+## Context
+
+Every currently-emitted sim-log event kind, listed and described in detail, as of SDL10 (the
+format last touched in the session that added `BlockPushed.reserved2` payload, head/retract arm
+coverage, `SEF_QUEUE_DEDUPED`, and positions on kinds 5-8 — the changes that made the log
+resume-complete, not just replay-complete). Includes a redundancy pass on top.
+
+All counts below are measured from decoded `.simlog` output over the 9-fixture corpus
+(`observer drop test`, `simple_observer_engine`, `simple_caterpillar`, `simple_no_sticky_loop`,
+`movableRCA`, `submarine`, `tank`, `complex_machine`, `1-wide with rails`) —
+**1,533,936 events, 147.3 MB.**
+
+---
+
+## Every kind, in emission order
+
+| # | kind | count | share | fixtures |
+|--:|---|--:|--:|--:|
+| 0 | PistonQueued | 110,467 | 7.20% | 9/9 |
+| 1 | PistonMoveExecuted | 51,073 | 3.33% | 9/9 |
+| 2 | BlockPushed | 168,055 | 10.96% | 9/9 |
+| 3 | ObserverFired | 53,191 | 3.47% | 6/9 |
+| 4 | ObserverActivated | 68,162 | 4.44% | 6/9 |
+| 5 | RedstoneBlockAppeared | 9,864 | 0.64% | 6/9 |
+| 6 | RedstoneBlockRemoved | 9,915 | 0.65% | 6/9 |
+| 7 | RedstoneActivatedPiston | 1,312 | 0.09% | 4/9 |
+| 8 | RedstoneDeactivatedPiston | 3,733 | 0.24% | 4/9 |
+| 9 | PistonExtendBlocked | 0 | — | never emitted (retired SDL8) |
+| 10 | PistonRetractBlocked | 0 | — | never emitted (retired SDL8) |
+| 11 | BlockLeftBehind | 0 | — | reserved, never emitted |
+| 12 | BlockDestroyed | 24,984 | 1.63% | 9/9 |
+| 13 | ComponentSplit | 0 | — | reserved, never emitted |
+| 14 | ObserverSuppressed | 0 | — | reserved, never emitted |
+| 15 | PistonNeighborNotified | 252,306 | 16.45% | 9/9 |
+| 16 | ScheduledTickDropped | 1,291 | 0.08% | 1/9 |
+| 17 | BlockPoweredChanged | 1,050 | 0.07% | 1/9 |
+| 18 | BlockSettled | 166,968 | 10.88% | 9/9 |
+| 19 | MovingBlockDropped | 0 | — | reserved, never emitted |
+| 20 | ScheduledTickCreated | 54,124 | 3.53% | 6/9 |
+| 21 | RailShapeChanged | 78 | 0.01% | 1/9 |
+| 22 | BlockStateChanged | 557,363 | 36.34% | 9/9 |
+
+Six kinds are reserved slots that no rule has ever populated (11, 13, 14, 19) or were retired on
+purpose (9, 10). These cost nothing (no bytes on disk, since nothing is emitted) and are not part
+of the redundancy question below — they're future capacity, already documented as such at
+`sim_event_log.h:39-53`.
+
+---
+
+## Detailed description of every kind that fires
+
+### 0 — PistonQueued
+**Where:** `checkForMove` (`simulator.cpp:969-997`), on every extend/retract transition a piston's
+`shouldPistonBeExtended` computes.
+**Fields:** `blockKey`/`actorKey` = piston's live position (not stable key — a moving piston hasn't
+relocated between queue and execute). `direction`, `SEF_EXTEND`. **SDL10:** `SEF_QUEUE_DEDUPED` set
+when `addBlockEvent` silently discarded this as a duplicate of an already-pending entry — measured
+23,334/78,104 (30%) on `1-wide with rails`, so this is not a rare case.
+**Meaning:** "the simulator decided this piston should extend/retract" — intent, not outcome. Two
+thirds of these never produce a `PistonMoveExecuted` (rejected later in `fireBlockEvent`/
+`pistonEventReceived`, or discarded on arrival per `SEF_QUEUE_DEDUPED`).
+
+### 1 — PistonMoveExecuted
+**Where:** `doPistonMove` (`simulator.cpp:1719-1803`), both the failure branch (`:1746`) and the
+success branch (`:1789`).
+**Fields:** `direction`, `SEF_EXTEND`, `SEF_SUCCESS` (clear = blocked), `failureReason` (one of the
+8 `SimFailureReason` values) when blocked, `attemptedAmount`/`actualAmount` = push group size,
+`pushGroupId`, `scheduledTick/Subtick` = when it was queued (via `takeQueued`).
+**Meaning:** the piston's own action record — moved, or tried and failed and why. This is also the
+only place `PushGroupRecord` gets written (`:1773`, `:1806`), which carries full group membership.
+
+### 2 — BlockPushed
+**Where:** three sites, all inside `doPistonMove`: the main per-block loop (`:1872`, one per
+carried block), the extending head (`simulator.cpp:1919-1941`, added this session), and the
+retracting head/arm (`simulator.cpp` inside `pistonEventReceived`'s retract branch, added this
+session).
+**Fields:** `actorKey` = piston, `targetKey` = destination cell, `direction`, `SEF_EXTEND`,
+`pushGroupId`. **SDL10:** `reserved2` = the full raw state word that will land when the flight
+ends (the whole reason for this session's work — see "the resume-completeness fix" below).
+`SEF_SELF_ARM` marks the head/retract-arm variant (subject is the piston itself, not a
+relocating block).
+**Meaning:** "a flight began." Every entry ever added to `World::movingBuckets` now has exactly one
+of these starting it.
+
+### 3 — ObserverFired
+**Where:** `observerUpdateTick` (`simulator.cpp:745-793` region, both the powered-on and
+powered-off scheduled-update paths).
+**Fields:** `SEC_SCHEDULED`/`SEC_FACING_CHANGED`/`SEC_OBSERVER_MOVED` cause in flags bits 2-3,
+`SEF_OBSERVER_ON` (set = the ON pulse, clear = the OFF transition 2 ticks later — same function,
+re-invoked via its own scheduled tick). `from`/`to` = the observer's live position (populated
+SDL8).
+**Meaning:** the observer's own pulse, cause included. Only present in 6/9 fixtures — the 3 without
+it use only redstone-block power, no observers.
+
+### 4 — ObserverActivated
+**Where:** `logObserverActivations` (`simulator.cpp:912-945`), a fan-out scan of the block in front
+of the observer plus that block's 4 side neighbours.
+**Fields:** `targetKey` = the piston/observer reached, `SEF_TARGET_PISTON` (else observer),
+`SEF_OBSERVER_ON`, `from` = observer, `to` = target (both live positions, SDL8).
+**Meaning:** "this pulse reached that specific piston/observer." Measured 1.37 targets per pulse —
+this is the expanded, per-target form of kind 3.
+
+### 5 — RedstoneBlockAppeared / 6 — RedstoneBlockRemoved
+**Where:** `setBlockState`'s block-type-change hook (`simulator.cpp:2073-2107`), whenever a redstone
+block (id) appears/disappears at a cell, whether by placement, destruction, or being carried by a
+push.
+**Fields:** `blockKey`/`actorKey` = stable id. **SDL10:** `from`==`to`== the live cell (previously
+100% `(0,0,0)`, fixed this session).
+**Meaning:** existence, not power — appearing/disappearing at a position, not "now providing power."
+Each one triggers `logRedstonePistonScan` immediately after (kinds 7/8).
+
+### 7 — RedstoneActivatedPiston / 8 — RedstoneDeactivatedPiston
+**Where:** `logRedstonePistonScan` (`simulator.cpp:950-981`), called from 5/6 above and also
+directly from the initial-load piston scan (`:2674`).
+**Fields:** `targetKey` = piston, `SEF_TARGET_PISTON`. **SDL10:** `from` = redstone block,
+`to` = piston (previously 100% `(0,0,0)`, fixed this session).
+**Meaning:** the per-neighbour-piston consequence of 5/6 — "this specific piston is now
+powered/unpowered by that redstone block." Same fan-out relationship to 5/6 that 4 has to 3.
+
+### 12 — BlockDestroyed
+**Where:** `logBlockDestroyed` (`simulator.cpp:467-489`), called from 5 distinct sites covering all
+5 `SED_*` causes: rail losing support, push-destroy (`PushReaction::Destroy` blocks popped by a
+push), orphaned piston head, orphaned extended base, head removed on retract.
+**Fields:** `reserved1` = `SED_*` cause byte.
+**Meaning:** "this block stopped existing, and here is which rule did it" — the cascading-deletion
+cases (orphan head/base) are only knowable through this record; nothing else states them.
+
+### 15 — PistonNeighborNotified
+**Where:** the generic `notifyNeighbors`/`neighborChangedImpl` path (`simulator.cpp` — the catch-all
+6-neighbour poke every block placement performs), whenever the notified block is a piston with no
+more specific kind (4/7/8/2-self) already covering the cause.
+**Fields:** `actorKey` = stableKey of the position that changed, `reserved0` = the raw block id that
+was there *before* the change.
+**Meaning:** "this piston was poked because something changed next to it, for a reason none of the
+more specific kinds capture" — the largest single kind by volume (16.45%). Re-verified this session:
+only 73-91% of these coincide with a same-tick `BlockStateChanged` at the notifying position; the
+rest are explicit `neighborChanged`/`notifyNeighbors` calls with no accompanying write. **Not
+redundant** — this was checked twice now and both times the "should be derivable" prediction failed
+measurement.
+
+### 16 — ScheduledTickDropped
+**Where:** `scheduleUpdate` (`simulator.cpp:647-680` region), when an identical `(pos, blockId)`
+scheduled tick is already pending.
+**Fields:** `reserved0` = the blockIdValue attempted.
+**Meaning:** the "attempt failed, nothing changed" counterpart to kind 20. Only appears in 1/9
+fixtures (rail-bearing/lamp machines).
+
+### 17 — BlockPoweredChanged
+**Where:** `logPoweredChanged` (`simulator.cpp:318-343`), shared by rail (golden/activator),
+fence gate, trapdoor, and redstone lamp toggling their own powered/open/lit bit.
+**Fields:** `reserved0` = raw block id (disambiguates which of the four), `SEF_POWERED_ON`.
+**Meaning:** a block's own state flag flipping, as opposed to it moving or being destroyed. Rare
+(0.07%) — only 1 fixture in the corpus exercises this path.
+
+### 18 — BlockSettled
+**Where:** `logMovingBlockEnded` (`simulator.cpp:344-378`), called from `settleMovingBlock` on the
+normal T+2 completion path and from `clearMovingAt` on early-cancel paths.
+**Fields:** `pushGroupId` (pairs back to the `BlockPushed` that started this flight), `reserved0` =
+raw carried block id, `reserved1` = `SEM_*` cause (which of 5 different paths ended the flight —
+normal, head-cancelled, sticky-pullback, cell-overwritten, not-placeholder), `scheduledTick/Subtick`
+= flight start, `executedTick/Subtick` = actual landing (duration is NOT a constant 2 — 2,040
+one-tick arrivals measured on `1-wide with rails`).
+**Meaning:** "a flight ended, successfully." Pairs 1:1 with a `BlockPushed` since this session's fix
+(previously 15,962+ unpaired).
+
+### 20 — ScheduledTickCreated
+**Where:** `logScheduledTickCreated` (`simulator.cpp:407-434` region), the success counterpart to
+kind 16, called from `scheduleUpdate` whenever a new tick is actually queued.
+**Fields:** `reserved0` = blockIdValue scheduled, `attemptedAmount` = delay in ticks, `reserved2` =
+the `ScheduledTick.order` tiebreak (needed to reproduce within-tick execution order of scheduled
+updates — this value appears nowhere else), `executedTick` = when queued, `scheduledTick` = when
+due.
+**Meaning:** live queue state insertion. Consumption (the tick actually firing, or being silently
+skipped because the block changed underneath) is not logged separately but is fully derivable —
+everything with `time <= now` leaves the queue deterministically.
+
+### 21 — RailShapeChanged
+**Where:** `logRailShapeChanged` (`simulator.cpp:385-406` region), called from `Rail.place`/
+`railConnectTo` whenever a rail rewrites its own or a neighbour's shape metadata.
+**Fields:** `reserved0` = raw block id, `reserved2` = the full new raw state word.
+**Meaning:** the one state change that genuinely cannot be inferred — it runs vanilla's full shape
+selection including the powered-hint corner tiebreak against the live neighbourhood. Rare in this
+corpus (78 events, 1 fixture) only because few fixtures use rails, not because it's rare per rail
+machine.
+
+### 22 — BlockStateChanged
+**Where:** inside `setBlockState` itself (`simulator.cpp`), for EVERY world write that actually
+changes something, regardless of which rule caused it. The choke-point backstop added in SDL9.
+**Fields:** `targetKey` = old raw state word, `reserved2` = new raw state word, `attemptedAmount` =
+the caller's `flags` argument (decides the neighbour/observer cascade that follows).
+**Meaning:** the ground truth of world state. This is the largest kind by far (36.34%) and is what
+makes the log replay-complete by construction — no rule needs re-implementing and none can silently
+escape the log, because this fires regardless of *why* the write happened.
+
+---
+
+## Redundancy: what's now derivable, and what still isn't
+
+A field is redundant only if a **deterministic post-processor** can fill it back in from what a
+model emitted, without re-implementing simulator rules. "Shadowed" (same tick+position as a more
+specific event) was measured as 100% for kind 22's *locator* fields in a prior pass over this
+format; re-affirmed here, not re-measured, since no code affecting that changed since.
+
+### Confirmed redundant (locator only, not the payload)
+
+**BlockStateChanged's `from/to`, tick/subtick fields, `blockKey`, and `targetKey` (old state)** are
+100% shadowed by a semantic event (`PistonMoveExecuted`, `BlockPushed`, `ObserverFired`,
+`RedstoneBlock*`, `BlockDestroyed`, `BlockPoweredChanged`, `BlockSettled`, `RailShapeChanged`) at
+the same `(tick, position)` — measured 100.0% on movableRCA/tank/1-wide with rails in the prior
+pass. `reserved2` (the new state) is **not** redundant — deriving it means re-implementing rail
+shape selection, meta-bit rules, etc. This is the compaction opportunity flagged before: a compact
+`(globalSeq, newState, flags)` section could replace the 96-byte record for this kind alone,
+cutting roughly a third of total log volume. Not yet implemented.
+
+### Confirmed NOT redundant, despite superficial appearance
+
+- **PistonNeighborNotified (15)** — re-tested this session's context; residual 9-27% has no
+  accompanying write. Keep.
+- **PistonQueued (0)** vs **PistonMoveExecuted (1)** — `scheduledTick` on the executed record makes
+  0 look absorbable, but two thirds of queues never produce a move, so 0 is the only record of the
+  attempt.
+- **BlockSettled (18)** — flight duration is not a constant, `SEM_*` cause distinguishes 5 different
+  code paths landing at the same tick with different ordering implications.
+- **RailShapeChanged (21)** — the one truly non-inferable state change; already noted above.
+
+### New to this pass, not previously flagged
+
+**Kinds 4 and 8 are structurally identical fan-outs of kinds 3 and 5/6 respectively** — "pulse/
+appearance at position X reaches piston Y" — and in both cases the static relation is *already*
+shipped separately as `WouldPowerEdge` (which also carries the quasi-connectivity distinction
+neither 4 nor 8 encodes). Previously judged "keep anyway" on the grounds that removing them forces
+a model to learn the fan-out rule with zero supervision — that judgement stands, but it's worth
+being explicit that **this is the only reason they're kept**, not a correctness necessity. If log
+size becomes a binding constraint, kinds 4/7/8 are the next-cheapest cut after the kind-22
+compaction above, in that order (4 is the largest at 4.44%).
+
+**Kinds 5 and 6 remain the closest thing to a genuinely free cut.** They are 1:1 with a
+`BlockPushed`/`BlockSettled` of the same block in the same tick whenever the redstone block moves
+(carried by a piston), and 1:1 with kind 22 whenever it's placed/broken directly — and
+`InitialBlockState.blockTypeId` already tells a reader it's a redstone block. Populating their
+position fields this session (fixing the "100% at origin" bug) makes them *more* useful, which
+cuts slightly against removing them now, but if trimming volume matters they're the best
+candidate: removing them loses only "a redstone block's appear/disappear is now witnessed
+one hop earlier than the RedstoneActivatedPiston/DeactivatedPiston that immediately follows."
+
+### No change from measurement
+
+Nothing in this pass found a *new* correctness gap — the three fixes landed earlier this session
+(BlockPushed payload, head/retract arm coverage, PistonQueued dedup flag) were verified via
+`util tools/check_log_completeness.py` (REPLAY 100%, RESUME 100% across all 9 fixtures) and the
+55-fixture behaviour-unchanged snapshot, both already passing. This pass is purely descriptive/
+redundancy analysis on top of that verified state.
+
+---
+
+## Recommended next step, if pursued
+
+Only one item rises to "worth doing": **the kind-22 compact section** (drop the shadowed locator
+fields, keep only `globalSeq`/`newState`/`flags` for `BlockStateChanged`). It's the single largest
+lever — roughly a third of every log — and every other candidate above is either already justified
+to keep (15, 0, 18, 21) or a small, judgement-call trim (4/7/8, 5/6) that trades supervision
+richness for a few percent of file size.
+
+### Files referenced
+- `cpp simulator/src/sim_event_log.h` — kind/flag/struct definitions, all descriptions above
+- `cpp simulator/src/simulator.cpp` — every emit site cited above
+- `util tools/verify_simulation_data.py` — decoder mirror (`KIND_NAMES`, flag constants)
+- `util tools/check_log_completeness.py` — the REPLAY/RESUME harness used to confirm no
+  regression while gathering these counts
