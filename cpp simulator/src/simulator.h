@@ -174,7 +174,8 @@ private:
     void logMovingBlockEnded(const World::MovingBlock& moving, bool settled, std::uint8_t cause);
     void scheduleUpdate(BlockPos pos, int blockId, int delay);
     bool isUpdateScheduled(BlockPos pos, int blockId) const;
-    void addBlockEvent(BlockPos pos, int blockId, int eventId, int eventParam);
+    // Returns false when an identical event was already queued and this one was discarded.
+    bool addBlockEvent(BlockPos pos, int blockId, int eventId, int eventParam);
     void neighborChanged(BlockPos pos, int sourceBlockId, BlockPos fromPos);
     void neighborChangedImpl(BlockPos pos, std::uint64_t key, int sourceBlockId, BlockPos fromPos);
     void observedNeighborChanged(BlockPos pos, int changedBlockId, BlockPos changedPos);
@@ -187,7 +188,7 @@ private:
     // block carried to a new position still logs under one blockKey. Falls back to the raw packed
     // position for anything not tracked.
     std::uint64_t stableKey(BlockPos pos) const;
-    void logPistonQueued(BlockPos pistonPos, int direction, bool extend);
+    void logPistonQueued(BlockPos pistonPos, int direction, bool extend, bool deduped);
     void logObserverActivations(BlockPos observerPos, std::uint32_t state, bool turningOn);
     void logRedstonePistonScan(BlockPos redstonePos, bool activating);
     bool shouldPistonBeExtended(BlockPos pos, std::uint32_t state) const;

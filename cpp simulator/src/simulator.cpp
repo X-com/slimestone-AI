@@ -687,7 +687,7 @@ bool Simulator::isUpdateScheduled(BlockPos pos, int blockIdValue) const {
     return false;
 }
 
-void Simulator::addBlockEvent(BlockPos pos, int blockIdValue, int eventId, int eventParam) {
+bool Simulator::addBlockEvent(BlockPos pos, int blockIdValue, int eventId, int eventParam) {
     std::vector<World::BlockEvent>& queue = world_.blockEvents[static_cast<std::size_t>(world_.blockEventCacheIndex)];
     if (trace_ != nullptr) {
         trace_->logBlock(world_, "w.beq", &pos, blockIdValue, eventId, eventParam);
@@ -695,10 +695,11 @@ void Simulator::addBlockEvent(BlockPos pos, int blockIdValue, int eventId, int e
     for (const World::BlockEvent& event : queue) {
         if (event.blockId == blockIdValue && event.eventId == eventId
                 && event.eventParam == eventParam && samePos(event.pos, pos)) {
-            return;
+            return false;
         }
     }
     queue.push_back(World::BlockEvent{pos, blockIdValue, eventId, eventParam});
+    return true;
 }
 
 // Core logic for neighborChanged, separated so notifyNeighbors can call it directly
@@ -880,7 +881,7 @@ std::uint64_t Simulator::stableKey(BlockPos pos) const {
     return it != originalIdOf_.end() ? it->second : packPos(pos);
 }
 
-void Simulator::logPistonQueued(BlockPos pistonPos, int direction, bool extend) {
+void Simulator::logPistonQueued(BlockPos pistonPos, int direction, bool extend, bool deduped) {
     // Queue/execute correlation is keyed by the piston's live position (it doesn't relocate
     // between its own queue and execute); the record's subject is the stable id.
     std::uint64_t pistonKey = packPos(pistonPos);
@@ -892,7 +893,10 @@ void Simulator::logPistonQueued(BlockPos pistonPos, int direction, bool extend) 
     ev.actorKey = subject;
     ev.kind = PistonQueued;
     ev.direction = static_cast<std::uint8_t>(direction);
-    ev.flags = extend ? SEF_EXTEND : 0;
+    // SEF_QUEUE_DEDUPED set = the attempt happened but addBlockEvent discarded it as a duplicate,
+    // so NOTHING entered world_.blockEvents. A reader rebuilding that queue must skip these or it
+    // builds a queue with entries the simulator never had.
+    ev.flags = (extend ? SEF_EXTEND : 0) | (deduped ? SEF_QUEUE_DEDUPED : 0);
     ev.activationTick = world_.time;
     ev.scheduledTick = world_.time;
     ev.executedTick = world_.time;
@@ -962,6 +966,14 @@ void Simulator::logRedstonePistonScan(BlockPos redstonePos, bool activating) {
         std::uint32_t order = eventLog_->nextOrder();
         ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
         ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+        // from = the redstone block, to = the piston it powers. Both live positions - redstoneKey
+        // and targetKey are stable ids naming spawn cells the machine has long since left.
+        ev.fromX = static_cast<std::int16_t>(redstonePos.x);
+        ev.fromY = static_cast<std::int16_t>(redstonePos.y);
+        ev.fromZ = static_cast<std::int16_t>(redstonePos.z);
+        ev.toX = static_cast<std::int16_t>(n.x);
+        ev.toY = static_cast<std::int16_t>(n.y);
+        ev.toZ = static_cast<std::int16_t>(n.z);
         eventLog_->push(ev);
     }
 }
@@ -980,19 +992,21 @@ void Simulator::checkForMove(BlockPos pos, std::uint32_t state) {
             if (trace_ != nullptr) {
                 trace_->logBlock(world_, "p.q+", &pos, id, 0, facing.index);
             }
+            // Queue first, log second: addBlockEvent silently discards an identical pending entry,
+            // and the record has to say which happened rather than assert an insertion that didn't.
+            bool queued = addBlockEvent(pos, id, 0, facing.index);
             if (eventLog_ != nullptr) {
-                logPistonQueued(pos, facing.index, true);
+                logPistonQueued(pos, facing.index, true, !queued);
             }
-            addBlockEvent(pos, id, 0, facing.index);
         }
     } else if (!shouldExtend && metaBit(state, 3)) {
         if (trace_ != nullptr) {
             trace_->logBlock(world_, "p.q-", &pos, id, 1, facing.index);
         }
+        bool queued = addBlockEvent(pos, id, 1, facing.index);
         if (eventLog_ != nullptr) {
-            logPistonQueued(pos, facing.index, false);
+            logPistonQueued(pos, facing.index, false, !queued);
         }
-        addBlockEvent(pos, id, 1, facing.index);
     }
 }
 
@@ -1611,6 +1625,31 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
         // The short-pulse case: this retract can land before the head's own extend arm has
         // completed, settling it early instead of at the usual 2 ticks.
         clearMovingAt(front, SEM_SETTLE_HEAD_CANCELLED);
+        std::uint32_t retractState = makeState(blockId(state), param);
+        std::uint32_t retractOrder = 0;
+        if (eventLog_ != nullptr) {
+            // Third and last flight-creation site (the others are the pushed arms and the head in
+            // doPistonMove). A retract arm flies in place - the piston's own cell holds a
+            // placeholder until the retracted piston lands back in it - but it is a flight like any
+            // other, so it gets the same BlockPushed. Emitted before the write, so the placeholder
+            // appearing reads as its consequence. Every entry in movingBuckets now starts with one
+            // of these, which is what lets a reader rebuild that queue from a cut point.
+            SimEvent ev;
+            ev.blockKey = ev.actorKey = stableKey(pos);
+            ev.targetKey = packPos(pos);
+            ev.kind = BlockPushed;
+            ev.direction = static_cast<std::uint8_t>(facing.index);
+            ev.flags = SEF_SUCCESS | SEF_SELF_ARM;   // retract: SEF_EXTEND clear
+            ev.reserved0 = static_cast<std::uint8_t>(blockId(state) & 0xFF);
+            ev.reserved2 = retractState;
+            ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+            ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+            ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+            retractOrder = eventLog_->nextOrder();
+            ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = retractOrder;
+            eventLog_->push(ev);
+        }
         setBlockState(pos, setFacingMeta(makeState(BLOCK_PISTON_EXTENSION, sticky ? 8 : 0), facing.index), 3);
         if (trace_ != nullptr) {
             trace_->log(world_, "te.set", &pos);
@@ -1618,11 +1657,11 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
         {
             // The retracting head animation: subject is the piston itself, and it belongs to no
             // doPistonMove push group (pushGroupId stays 0 = n/a).
-            World::MovingBlock retractArm{pos, makeState(blockId(state), param), blockId(state), facing.index, false, true};
+            World::MovingBlock retractArm{pos, retractState, blockId(state), facing.index, false, true};
             if (eventLog_ != nullptr) {
                 retractArm.subjectKey = retractArm.actorKey = stableKey(pos);
                 retractArm.createdTick = world_.time;
-                retractArm.createdSubtick = eventLog_->nextOrder();
+                retractArm.createdSubtick = retractOrder;
             }
             addMovingBlock(retractArm);
         }
@@ -1881,6 +1920,10 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             ev.actualAmount = static_cast<std::uint8_t>(moveCount);
             ev.fromX = static_cast<std::int16_t>(source.x); ev.fromY = static_cast<std::int16_t>(source.y); ev.fromZ = static_cast<std::int16_t>(source.z);
             ev.toX = static_cast<std::int16_t>(target.x); ev.toY = static_cast<std::int16_t>(target.y); ev.toZ = static_cast<std::int16_t>(target.z);
+            // The flight's payload. Without it a reader joining the log mid-flight cannot know what
+            // will land: the destination cell holds only the id-36 placeholder, whose meta encodes
+            // the direction and nothing about the carried block. See kind 2's doc in sim_event_log.h.
+            ev.reserved2 = movedState;
             std::uint32_t order = eventLog_->nextOrder();
             ev.activationTick = ev.executedTick = world_.time;
             ev.activationSubtick = ev.executedSubtick = order;
@@ -1912,6 +1955,30 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
         int headMeta = direction.index | (sticky ? 8 : 0);
         std::uint32_t movingHead = setFacingMeta(makeState(BLOCK_PISTON_EXTENSION, sticky ? 8 : 0), direction.index);
         BlockPos front = offset(pos, direction);
+        std::uint32_t headState = makeState(BLOCK_PISTON_HEAD, headMeta);
+        std::uint32_t headOrder = 0;
+        if (eventLog_ != nullptr) {
+            // The head flies exactly like any pushed block, so it gets the same BlockPushed the arms
+            // above get - emitted before the write, so the placeholder appearing reads as its
+            // consequence. Without this the head's arrival was logged but its departure was not, and
+            // a reader joining mid-flight could not know a head arm existed at all.
+            SimEvent ev;
+            ev.blockKey = pistonSubject;   // the head has no original block; file it under its piston
+            ev.actorKey = pistonSubject;
+            ev.targetKey = packPos(front);
+            ev.kind = BlockPushed;
+            ev.direction = static_cast<std::uint8_t>(direction.index);
+            ev.flags = SEF_EXTEND | SEF_SUCCESS | SEF_SELF_ARM;
+            ev.pushGroupId = pushGroup;
+            ev.reserved0 = static_cast<std::uint8_t>(BLOCK_PISTON_HEAD & 0xFF);
+            ev.reserved2 = headState;
+            ev.fromX = static_cast<std::int16_t>(pos.x); ev.fromY = static_cast<std::int16_t>(pos.y); ev.fromZ = static_cast<std::int16_t>(pos.z);
+            ev.toX = static_cast<std::int16_t>(front.x); ev.toY = static_cast<std::int16_t>(front.y); ev.toZ = static_cast<std::int16_t>(front.z);
+            headOrder = eventLog_->nextOrder();
+            ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
+            ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = headOrder;
+            eventLog_->push(ev);
+        }
         setBlockState(front, movingHead, 4);
         if (trace_ != nullptr) {
             trace_->log(world_, "te.set", &front);
@@ -1921,12 +1988,14 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             // under the acting piston (see logMovingBlockEnded) - this is the head's only
             // first-class appearance in the log. It shares the push group so a reader can see the
             // head and the blocks it pushed arriving as one actuation.
-            World::MovingBlock headArm{front, makeState(BLOCK_PISTON_HEAD, headMeta), BLOCK_PISTON_HEAD, direction.index, true, true};
+            World::MovingBlock headArm{front, headState, BLOCK_PISTON_HEAD, direction.index, true, true};
             if (eventLog_ != nullptr) {
                 headArm.actorKey = pistonSubject;
                 headArm.pushGroupId = pushGroup;
                 headArm.createdTick = world_.time;
-                headArm.createdSubtick = eventLog_->nextOrder();
+                // Reuses the BlockPushed's own order - the push IS the moment the flight began,
+                // same convention as the arm path above.
+                headArm.createdSubtick = headOrder;
             }
             addMovingBlock(headArm);
         }
@@ -2073,6 +2142,13 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
     // simulation_data: redstone block appearing/disappearing, plus its per-neighbor piston
     // activation/deactivation (source-side, where the redstone identity is certain).
     if (eventLog_ != nullptr && oldId != newId) {
+        // from == to == the live cell. blockKey is the block's spawn cell, which a carried redstone
+        // block left long ago, so without these the record located every event at the origin.
+        auto setPos = [&](SimEvent& ev) {
+            ev.fromX = ev.toX = static_cast<std::int16_t>(pos.x);
+            ev.fromY = ev.toY = static_cast<std::int16_t>(pos.y);
+            ev.fromZ = ev.toZ = static_cast<std::int16_t>(pos.z);
+        };
         if (newId == BLOCK_REDSTONE_BLOCK) {
             SimEvent ev;
             ev.blockKey = ev.actorKey = stableKey(pos);
@@ -2080,6 +2156,7 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
             std::uint32_t order = eventLog_->nextOrder();
             ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
             ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+            setPos(ev);
             eventLog_->push(ev);
             logRedstonePistonScan(pos, true);
         }
@@ -2090,6 +2167,7 @@ void Simulator::setBlockState(BlockPos pos, std::uint32_t state, int flags) {
             std::uint32_t order = eventLog_->nextOrder();
             ev.activationTick = ev.scheduledTick = ev.executedTick = world_.time;
             ev.activationSubtick = ev.scheduledSubtick = ev.executedSubtick = order;
+            setPos(ev);
             eventLog_->push(ev);
             logRedstonePistonScan(pos, false);
         }

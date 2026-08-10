@@ -21,7 +21,15 @@ namespace mcp1122 {
 enum SimEventKind : std::uint8_t {
     PistonQueued = 0,              // piston (subject) had an extend/retract queued
     PistonMoveExecuted = 1,        // piston (subject) executed a move; flags bit1=0 if blocked
-    BlockPushed = 2,               // subject block carried by a piston; actorKey=piston, targetKey=dest
+    // subject block carried by a piston; actorKey=piston, targetKey=dest. SDL10: reserved2 = the
+    // full raw state word (type|meta) of the block in flight - what settleMovingBlock will write
+    // when the flight ends - and reserved0 = its raw block id. This is what makes the log
+    // resume-complete: mid-flight the destination cell holds only the id-36 placeholder, whose meta
+    // encodes the push DIRECTION and nothing about the payload, so a reader joining the log after
+    // the push cannot otherwise know what will land. Also SDL10: the piston HEAD now gets one of
+    // these too (it flies exactly like any other arm); it has no original block, so blockKey is the
+    // acting piston and reserved0 == BLOCK_PISTON_HEAD, matching what BlockSettled already did.
+    BlockPushed = 2,
     ObserverFired = 3,             // observer (subject) pulsed; flags bits2-3 = cause
     ObserverActivated = 4,         // observer (subject) pulse reached targetKey; flags bit4 = target is piston
     RedstoneBlockAppeared = 5,     // redstone block (subject) placed at a position
@@ -148,6 +156,19 @@ constexpr std::uint8_t SEF_OBSERVER_ON   = 1 << 5; // ObserverFired/ObserverActi
                                                     // (same function, re-invoked via the scheduled
                                                     // tick it queued itself).
 constexpr std::uint8_t SEF_POWERED_ON    = 1 << 6; // BlockPoweredChanged: set = now on/open/lit
+// SDL10. PistonQueued: set = the attempt was made but addBlockEvent discarded it as a duplicate of
+// an entry already pending, so nothing was actually queued. Before SDL10 the record was emitted
+// before that check ran and so claimed insertions that never happened - a reader rebuilding
+// world_.blockEvents from the log built a queue the simulator never had. The record is still
+// emitted (the attempt is real signal) but now says which of the two it was.
+constexpr std::uint8_t SEF_QUEUE_DEDUPED = 1 << 7;
+// SDL10. BlockPushed: this flight is a piston's own moving part - the head extending, or the head
+// animating back on retract - not a separate block relocating. Both are genuine entries in
+// World::movingBuckets and so must be logged for the queue to be reconstructible, but the subject
+// is the acting piston itself (blockKey == actorKey) and it does not change cells. A consumer
+// rendering block movement should skip these; one rebuilding movingBuckets must not.
+// Shares bit 2 with the ObserverFired cause field, which is meaningless on BlockPushed.
+constexpr std::uint8_t SEF_SELF_ARM      = 1 << 2;
 
 // ObserverFired cause, stored in flags bits 2-3.
 constexpr std::uint8_t SEC_SCHEDULED       = 0; // generic scheduled pulse
@@ -322,10 +343,21 @@ struct RunSummary {
 // widens that kind to cover push-destroy and cascading orphan deletions), from/to now populated on
 // ObserverFired/ObserverActivated/PistonQueued, and Piston*Blocked no longer emitted. Same
 // reasoning as before: no field moved, but the meaning of existing bytes changed underfoot.
-// Bumped SDL8->SDL9 for BlockStateChanged, which makes the log replay-complete.
+// Bumped SDL8->SDL9 for BlockStateChanged, which makes the log replay-complete. Bumped SDL9->SDL10
+// for the resume-completeness pass: BlockPushed now carries the in-flight payload in reserved2 (and
+// is emitted for the piston head too), Redstone{BlockAppeared,BlockRemoved,ActivatedPiston,
+// DeactivatedPiston} finally populate from/to like every other kind, and PistonQueued gained
+// SEF_QUEUE_DEDUPED. Replay-complete (rebuild the world reading front to back) was already true at
+// SDL9; resume-complete (rebuild the FULL simulator state - including in-flight blocks and both
+// queues - from any cut point, which is what a model predicting the next event does at every step)
+// needed these. Same convention as every prior bump: no field moved, but the meaning of existing
+// bytes changed underfoot, so an SDL9 reader would read reserved2 as padding and mistake a
+// deduped queue attempt for a real insertion.
+//   The magic is 4 bytes, so version 10 cannot spell "SDL10". It continues in hex instead:
+//   'A' == 10, so SDL9 -> SDLA, and 11 would be SDLB. formatVersion stays plain decimal.
 struct SimLogFooter {
-    char          magic[4] = {'S', 'D', 'L', '9'};
-    std::uint32_t formatVersion = 9;
+    char          magic[4] = {'S', 'D', 'L', 'A'};
+    std::uint32_t formatVersion = 10;
     std::uint64_t simulatorBuildHash = 0;
     std::uint64_t generatorSeed = 0;
     std::uint64_t eventCount = 0;

@@ -74,6 +74,7 @@ _PISTON_IDS = {BLOCK_PISTON, BLOCK_STICKY_PISTON}
 # re-exported by transformer_gym.simlog_reader - only verify_simulation_data.py defines them).
 _SEF_EXTEND = 1 << 0
 _SEF_SUCCESS = 1 << 1
+_SEF_SELF_ARM = 1 << 2  # BlockPushed: a piston's own head/retract animation, not a block relocating
 _SEF_OBSERVER_ON = 1 << 5
 _SEF_POWERED_ON = 1 << 6
 # BlockPoweredChanged's subject block ID swaps on a lamp turning on/off (123 <-> 124), unlike a
@@ -166,6 +167,12 @@ def build_animation_record_from_bytes(data: bytes) -> dict:
                 events.append({"tick": ev.executedTick, "order": ev.executedSubtick, "kind": "blockSettled", "blockIndex": i})
                 continue
             if ev.kind != _BLOCK_PUSHED_KIND:
+                continue
+            # SDL10 logs a BlockPushed for a piston's own moving parts too (head extending, head
+            # animating back on retract) so movingBuckets is reconstructible. Those are filed under
+            # the acting piston and do not relocate it, so rendering them would teleport the piston
+            # onto its own head position. The extend/retract timeline below already draws them.
+            if ev.flags & _SEF_SELF_ARM:
                 continue
             steps.append({"tick": ev.executedTick, "order": ev.executedSubtick, "x": ev.toX, "y": ev.toY, "z": ev.toZ,
                           "group": ev.pushGroupId})

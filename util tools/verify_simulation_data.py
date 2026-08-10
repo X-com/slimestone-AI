@@ -29,7 +29,7 @@ On-disk layout (must stay in sync with cpp simulator/src/sim_event_log.h):
                             actually fire during the observed run, unlike the dynamic section above
     static push members   : flat uint64 array for the section above, indexed the same way, but a
                             SEPARATE array from the dynamic push-group members
-    footer                : 188 bytes, magic "SDL9", offsets/counts for every section above
+    footer                : 188 bytes, magic "SDLA", offsets/counts for every section above
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ _INITIAL = struct.Struct("<QhhhHBBBBhBBII")             # 32 bytes
 _COMPONENT = struct.Struct("<hBBIhhhhhhIQ")             # 32 bytes
 _SUMMARY = struct.Struct("<BBbBii" + "h" * 12 + "I" * 7)  # 64 bytes
 _WOULDPOWER = struct.Struct("<QQB7x")                   # 24 bytes (7x = 7 pad bytes)
-_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDL9)
+_FOOTER = struct.Struct("<4sIQQQQIIIQIIQIIQIIQIIQIIQQIIQIIQQ")  # 188 bytes (SDLA)
 assert _EVENT.size == 96, _EVENT.size
 assert _INDEX.size == 32, _INDEX.size
 assert _PUSHGROUP.size == 48, _PUSHGROUP.size
@@ -114,6 +114,8 @@ SEF_SUCCESS = 1 << 1
 SEF_TARGET_PISTON = 1 << 4
 SEF_OBSERVER_ON = 1 << 5  # ObserverFired/ObserverActivated: set = ON pulse, clear = OFF transition
 SEF_POWERED_ON = 1 << 6  # BlockPoweredChanged: set = now on/open/lit
+SEF_QUEUE_DEDUPED = 1 << 7  # PistonQueued: attempt discarded as a duplicate; nothing was queued
+SEF_SELF_ARM = 1 << 2  # BlockPushed: piston's own head/retract animation, not a block relocating
 
 
 def _unpack21(v: int) -> int:
@@ -220,8 +222,8 @@ def read_footer(data: bytes) -> dict:
      static_push_group_off, static_push_group_count, static_push_member_count,
      static_push_member_off, _r) = \
         _FOOTER.unpack_from(data, len(data) - _FOOTER.size)
-    if magic != b"SDL9":
-        raise ValueError(f"bad magic {magic!r} (expected SDL9)")
+    if magic != b"SDLA":
+        raise ValueError(f"bad magic {magic!r} (expected SDLA)")
     if ev_sz != _EVENT.size or blk_sz != _INDEX.size:
         raise ValueError(f"record size mismatch ev={ev_sz} blk={blk_sz}")
     return {
@@ -309,9 +311,16 @@ def _fmt_event(ev: SimEvent) -> str:
         parts.append(f"dir={DIR_NAMES.get(ev.direction, ev.direction)}")
         if ev.kind == 1:
             parts.append("moved" if ev.flags & SEF_SUCCESS else "BLOCKED")
+        if ev.kind == 0 and ev.flags & SEF_QUEUE_DEDUPED:
+            parts.append("DEDUPED(not queued)")
         if ev.kind == 2:
             parts.append(f"by piston{unpack_pos(ev.actorKey)}->{unpack_pos(ev.targetKey)}")
             parts.append(f"({ev.fromX},{ev.fromY},{ev.fromZ})->({ev.toX},{ev.toY},{ev.toZ})")
+            # SDL10: the in-flight payload - what will be written when the flight ends.
+            carried = BLOCK_NAMES.get(ev.extraWord & 0xFF, ev.extraWord & 0xFF)
+            parts.append(f"carries={carried}:{ev.extraWord >> 8}")
+            if ev.flags & SEF_SELF_ARM:
+                parts.append("SELF_ARM(piston's own head)")
         if ev.kind in (9, 10) or ev.failureReason:
             parts.append(f"FAIL={FAILURE_REASON_NAMES.get(ev.failureReason, ev.failureReason)}")
         parts.append(f"amt {ev.attemptedAmount}->{ev.actualAmount}")
@@ -518,7 +527,7 @@ def _self_check() -> None:
     body += _PUSHGROUP.pack(0, kB, 0, 0, 0, 1, 0, 0, 0, 0, len(static_members), 0, 2, 0)
 
     footer = _FOOTER.pack(
-        b"SDL9", 9, 0, 0, 3, idx_off, 2, 96, 32,
+        b"SDLA", 10, 0, 0, 3, idx_off, 2, 96, 32,
         pg_rec_off, 1, 48,
         pg_off, len(push_members), 0,
         initial_off, 1, 32,
