@@ -1,0 +1,6 @@
+{
+ "_": "The deferred-decision probe from the build plan: does discounting cargo raise non-cargo discoveries per 1,000 simulator calls? Run it against stage1.json and compare the metrics rows.",
+ "train": { "reward_cargo": 0.1 },
+ "search": { "k": 2, "simulations": 200 },
+ "loop": { "rounds": 20, "episodes_per_round": 8, "train_steps_per_round": 30 }
+}

@@ -2,8 +2,8 @@
 
 Home of a new model that modifies working flying machines and gets better at it over time.
 
-Nothing is built yet. This folder holds the design decisions and their reasons, so implementation
-starts from settled ground rather than re-deriving the same arguments.
+This folder holds the design decisions and their reasons. The code lives in `../rlgym/` and its tests
+in `../test_unit/`. See **Status** below for what is built.
 
 ## The goal
 
@@ -40,7 +40,9 @@ the only objective it has, and a block riding along genuinely works. See `OPEN.m
 | file | contents |
 |---|---|
 | `ALPHAZERO.md` | **how the model searches and improves — architecture, MCTS, training, build order** |
+| `TRAINING.md` | **how to run it — the pieces, the three stages, and which number to look at** |
 | `VERIFICATION.md` | how we tell a broken implementation from a model that is not learning |
+| `BENCHMARKS.md` | the label corpus, the baseline ladder, and measured timings |
 | `QUESTIONS.md` | what each of the 33 design points asks, and why it matters |
 | `DECISIONS.md` | what was decided for each point — **the main reference for inputs and outputs** |
 | `DEFERRED.md` | problems deliberately left unsolved, with notes for whoever picks them up |
@@ -65,10 +67,9 @@ the policy side) and 19 ("keep everything" holds for three of four label types, 
 All 33 design points are settled or explicitly deferred, and `ALPHAZERO.md` settles the search and
 training loop on top of them.
 
-Three changes to the C++ simulator fall out — records written to standard output instead of one file per
-candidate, per-tick board snapshots behind a flag, and the framing and binary-mode details both require.
-**Only the snapshot flag is on the critical path**; the stdout change is a throughput fix that matters
-only once the loop runs continuously.
+**No C++ change is on the critical path** — see the point 27 reversal below. The one remaining
+candidate, records to stdout (point 25), is a throughput fix that matters only once the loop runs
+continuously at ~1,000/sec for days.
 
 **Phase A is built and Milestone 1 has run.** `rlgym/game.py`, `rlgym/sim.py` and `rlgym/labeller.py`,
 with 98 tests in `test_unit/` (78 fast, 20 simulator-driven).
@@ -85,8 +86,15 @@ Both branches of the plan's decision table fired at once. 99.7% of the positive 
 riding along, so **a graded reward is now the highest-value open item**, not a refinement. The single
 non-cargo discovery reverses the machine's flight direction. Full result in `ALPHAZERO.md`.
 
-**Phase B has started**, and it turned out to need no C++ change at all. `rlgym/record.py`,
-`rlgym/simlog.py` and `rlgym/boards.py` are built; 117 tests pass.
+**Phases B and C are built, and the training loop runs end to end** — network, supervised
+training, PUCT with simulator leaves, the machine library and attempt log, and the outer loop with
+its three-way budget split. `TRAINING.md` is the operating manual: what each file does, how to run
+each stage, and which number to look at.
+
+**The label corpus exists.** 33 machines, **207,935 exhaustively labelled actions** - every action of
+every small fixture, labelled exactly. That replaces point 17's "train on one machine" with a real
+train/test split. Corpus-wide: 43.60% working, **0.348% non-cargo**, so Milestone 1's cargo ratio holds
+at scale. See `BENCHMARKS.md` for the baseline ladder the model must beat.
 
 **Point 27 is reversed.** It called for per-tick snapshots from the C++ simulator because rebuilding
 state in Python would reimplement physics. That is true of `transformer_gym/state.py`, and false of
@@ -96,7 +104,13 @@ every write states what it overwrites, so a missing write cannot hide. **Zero mi
 fixtures.** No C++ change is on the critical path, and the byte-for-byte Java-verified simulator stays
 untouched.
 
-Next: `graph.py`, then the network.
+**Graph construction is ~90x slower than simulation** (157 ms mean per machine against 0.26 ms per
+candidate) — `SLOWDOWNS.md` #3 confirmed with numbers rather than predicted. Already mitigated by a
+property that falls out of the design rather than an optimisation: **a placement changes features, never
+structure**, so a machine needs exactly one graph build and every candidate on it is a note patch.
+Verified directly — the same machine built with and without a note produces byte-identical edge arrays.
+
+Next: `net.py` and `train.py`, then search and the loop.
 
 ---
 

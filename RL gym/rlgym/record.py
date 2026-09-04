@@ -285,6 +285,34 @@ def read_push_groups(data: bytes, footer: dict[str, Any]) -> tuple[list[PushGrou
     return groups, members
 
 
+@dataclass(frozen=True)
+class WouldPower:
+    """Static t=0 relation: source_key powers piston_key, computed once by the simulator's own
+    power-resolution code rather than reimplemented. via_qc distinguishes direct adjacency from
+    quasi-connectivity - power reaching the block ABOVE the piston.
+
+    The distinction has to be kept because quasi-connectivity powers a piston without ever
+    firing a block update, so a model that cannot see it sees pistons activating uncaused.
+    """
+
+    source_key: int
+    piston_key: int
+    via_qc: bool
+
+
+def read_would_power(data: bytes, footer: dict[str, Any]) -> list[WouldPower]:
+    out: list[WouldPower] = []
+    count = footer.get("wouldPowerCount", 0)
+    if not count:
+        return out
+    base = footer["wouldPowerOffset"]
+    size = footer["wouldPowerRecSize"]
+    for index in range(count):
+        source, piston, via = struct.unpack_from("<QQB", data, base + index * size)
+        out.append(WouldPower(source_key=source, piston_key=piston, via_qc=bool(via)))
+    return out
+
+
 @dataclass
 class Record:
     footer: dict[str, Any]
@@ -293,6 +321,7 @@ class Record:
     events: list[Event]
     push_groups: list[PushGroup]
     push_members: list[int]
+    would_power: list[WouldPower]
 
     @classmethod
     def load(cls, path: str | Path) -> "Record":
@@ -310,6 +339,7 @@ class Record:
             events=read_events(data, footer),
             push_groups=groups,
             push_members=members,
+            would_power=read_would_power(data, footer),
         )
 
     def events_in_order(self) -> list[Event]:

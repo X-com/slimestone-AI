@@ -1,0 +1,118 @@
+{
+ "9fd5e18effce2d3378b9dbed56adc8e947bfb11d4b2dab861500da8cb7ce063b": {
+  "digest": "9fd5e18effce2d3378b9dbed56adc8e947bfb11d4b2dab861500da8cb7ce063b",
+  "name": "simple_observer_engine",
+  "candidate": {
+   "id": 0,
+   "trigger": {
+    "x": 0,
+    "y": 1,
+    "z": 1
+   },
+   "blocks": [
+    {
+     "x": 0,
+     "y": 0,
+     "z": 1,
+     "state": 165
+    },
+    {
+     "x": 0,
+     "y": 0,
+     "z": 2,
+     "state": 1313
+    },
+    {
+     "x": 0,
+     "y": 1,
+     "z": 1,
+     "state": 730
+    },
+    {
+     "x": 1,
+     "y": 0,
+     "z": 1,
+     "state": 1053
+    },
+    {
+     "x": 1,
+     "y": 0,
+     "z": 2,
+     "state": 165
+    },
+    {
+     "x": 1,
+     "y": 1,
+     "z": 2,
+     "state": 986
+    }
+   ]
+  },
+  "parent": null,
+  "generation": 0,
+  "period": 10,
+  "shift": [
+   1,
+   0,
+   0
+  ],
+  "blocks": 6,
+  "round_found": 0,
+  "descendants": 0
+ },
+ "9876aaaff4a6ce9a6c21034d1cd87ba33d110ba9b17d1d8cee0f0f8683237ec0": {
+  "digest": "9876aaaff4a6ce9a6c21034d1cd87ba33d110ba9b17d1d8cee0f0f8683237ec0",
+  "name": "simple_machine2",
+  "candidate": {
+   "id": 0,
+   "trigger": {
+    "x": 0,
+    "y": 1,
+    "z": 1
+   },
+   "blocks": [
+    {
+     "x": 0,
+     "y": 1,
+     "z": 1,
+     "state": 1313
+    },
+    {
+     "x": 1,
+     "y": 0,
+     "z": 1,
+     "state": 1242
+    },
+    {
+     "x": 1,
+     "y": 1,
+     "z": 1,
+     "state": 165
+    },
+    {
+     "x": 1,
+     "y": 2,
+     "z": 1,
+     "state": 152
+    },
+    {
+     "x": 2,
+     "y": 1,
+     "z": 1,
+     "state": 1053
+    }
+   ]
+  },
+  "parent": null,
+  "generation": 0,
+  "period": 10,
+  "shift": [
+   1,
+   0,
+   0
+  ],
+  "blocks": 5,
+  "round_found": 0,
+  "descendants": 0
+ }
+}

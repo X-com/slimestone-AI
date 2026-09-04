@@ -28,9 +28,15 @@ calling the thing under test.
 and are **skipped, not failed**, when the C++ binary has not been built.
 
 ```
-py -m pytest test_unit                 # everything      98 tests,  9.7s
-py -m pytest test_unit -m "not slow"   # no simulator    78 tests,  0.17s
+py -m pytest test_unit                 # everything
+py -m pytest test_unit -m "not slow"   # no simulator
 ```
+
+The model half is deliberately in the **fast** half. `test_net.py` and `test_search.py` build
+their own toy graphs and use a fake oracle rather than calling `graph.py` or the simulator, so a
+failure there points at the network or the search and cannot be a symptom of the record decoder.
+That follows the same rule as `conftest.py`: a bug in one file must not be able to hide behind
+another.
 
 ## Per component, what the oracle is
 
@@ -59,7 +65,7 @@ back. One assertion covering candidate construction, the `id | meta<<8` packing,
 placement, the stdin protocol, batch framing and `canonical_hash`, **with no expected values
 written by hand**.
 
-### 2. Batch-independence (`test_sim_protocol.py`, and `test_net_batching.py` in Phase B)
+### 2. Batch-independence (`test_sim_protocol.py`, `test_net.py`)
 
 `main.cpp:57` `processStream` reuses **one `Simulator` instance** across the entire stream, so
 cross-candidate state leakage is a live risk. It would be completely invisible: nothing crashes,
@@ -150,6 +156,26 @@ differently. New probes start a new named set with its own history.
 very likely be rediscovered and quietly trained on. Building them from unrelated hand-made
 machines makes the requirement structural rather than a blocklist that must work perfectly
 forever; a hash blocklist stays as a safety net that should almost never fire.
+
+### 4. The note patch equals a rebuild (`test_dataset.py`)
+
+`apply_notes` exists because a graph build costs enough that 207,935 examples would be nine hours
+of rebuilding. It is only sound if it is genuinely the same thing, so the test asserts every array
+of a patched graph against a full `build(..., placements=...)` — features, edges and all.
+
+If the two ever drift, training uses a slightly different input from the one every structural and
+semantic test checks, and **nothing else in the suite would notice**. This is the same category as
+the two above: a silent wrongness, not a crash.
+
+### 5. The search's worked example is a literal (`test_search.py`)
+
+`ALPHAZERO.md` Part 4's PUCT table was computed by hand in the design document. The test asserts
+0.712 / 0.233 / 0.186 / 0.140 as written-out numbers rather than recomputing them, so a rearranged
+formula disagrees with the design instead of quietly agreeing with itself.
+
+The same file pins the two properties that fail silently: **backup conservation** (`W(a)` must be
+exactly `N(a) x reward(a)` at k=1) and **no sign flip** (single-player; importing the two-player
+habit would invert every preference the search forms, and it would still run).
 
 ## What runs when
 

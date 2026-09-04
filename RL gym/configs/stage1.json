@@ -1,0 +1,15 @@
+{
+ "_": "Stage 1 - PUCT with ground-truth leaves at k=2. Budget is counted in simulator calls.",
+ "search": {
+  "k": 2,
+  "simulations": 200,
+  "c_puct": 1.25,
+  "temperature": 1.0,
+  "search_top_m": 0
+ },
+ "loop": {
+  "rounds": 20,
+  "episodes_per_round": 8,
+  "train_steps_per_round": 30
+ }
+}

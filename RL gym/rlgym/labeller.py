@@ -268,22 +268,146 @@ def _report(result: LabelSet) -> str:
     return "\n".join(lines)
 
 
+def save(result: LabelSet, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = asdict(result)
+    payload["success_rate"] = result.success_rate
+    payload["non_cargo_rate"] = result.non_cargo_rate
+    path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+
+
+def load(path: Path) -> LabelSet:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    labels = [
+        Label(
+            action=item["action"],
+            cell=tuple(item["cell"]),
+            slot=item["slot"],
+            entry=item["entry"],
+            reward=item["reward"],
+            period=item["period"],
+            shift=tuple(item["shift"]),
+            working=item["working"],
+            maybe_cargo=item["maybe_cargo"],
+            duplicate_of=item["duplicate_of"],
+        )
+        for item in payload["labels"]
+    ]
+    return LabelSet(
+        machine=payload["machine"],
+        radius=payload["radius"],
+        k=payload["k"],
+        action_slots=payload["action_slots"],
+        legal_actions=payload["legal_actions"],
+        simulated=payload["simulated"],
+        duplicates=payload["duplicates"],
+        working=payload["working"],
+        maybe_cargo=payload["maybe_cargo"],
+        labels=labels,
+        diagnostics=payload["diagnostics"],
+    )
+
+
+def corpus_names(max_blocks: int = 200) -> list[str]:
+    """Every fixture small enough to label exhaustively, by block count.
+
+    Machines without a valid cycle are NOT filtered here - label_k1 refuses them itself, with a
+    reason, which is more useful than silently omitting them from a sweep.
+    """
+    out = []
+    for path in sorted(FIXTURE_DIR.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if len(data.get("blocks") or []) <= max_blocks:
+            out.append(path.stem)
+    return out
+
+
+def label_corpus(
+    names: list[str] | None = None,
+    radius: int = 1,
+    workers: int = 12,
+    out_dir: Path | None = None,
+    max_blocks: int = 200,
+) -> dict[str, LabelSet]:
+    """Exhaustively label every usable fixture. ~9 minutes for the whole small corpus.
+
+    This is what replaces DECISIONS.md point 17's "train on one machine": ~250,000 dense, exact
+    labels over ~33 machines, which makes generalisation measurable instead of asserted.
+    """
+    names = names or corpus_names(max_blocks)
+    results: dict[str, LabelSet] = {}
+    skipped: list[tuple[str, str]] = []
+    started = time.perf_counter()
+
+    for index, name in enumerate(names, start=1):
+        if out_dir is not None:
+            cached = out_dir / f"{name}.json"
+            if cached.exists():
+                results[name] = load(cached)
+                print(f"[{index}/{len(names)}] {name}: cached")
+                continue
+        try:
+            result = label_k1(name, radius=radius, workers=workers)
+        except ValueError as exc:
+            skipped.append((name, str(exc).split("(")[0].strip()))
+            print(f"[{index}/{len(names)}] {name}: SKIPPED - no valid cycle")
+            continue
+        results[name] = result
+        if out_dir is not None:
+            save(result, out_dir / f"{name}.json")
+        print(
+            f"[{index}/{len(names)}] {name}: {result.legal_actions} actions, "
+            f"{result.working} working ({result.success_rate * 100:.1f}%), "
+            f"{result.non_cargo} non-cargo"
+        )
+
+    wall = time.perf_counter() - started
+    total_actions = sum(r.legal_actions for r in results.values())
+    total_working = sum(r.working for r in results.values())
+    total_non_cargo = sum(r.non_cargo for r in results.values())
+    print()
+    print(f"machines labelled     {len(results)}   skipped {len(skipped)} (no valid cycle)")
+    print(f"total actions         {total_actions}")
+    print(
+        f"total working         {total_working} "
+        f"({total_working / max(1, total_actions) * 100:.2f}%)"
+    )
+    print(
+        f"total non-cargo       {total_non_cargo} "
+        f"({total_non_cargo / max(1, total_actions) * 100:.3f}%)"
+    )
+    print(f"wall time             {wall:.1f}s")
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("machine", nargs="?", default="simple_observer_engine")
+    parser.add_argument("--all", action="store_true", help="sweep the whole small corpus")
     parser.add_argument("--radius", type=int, default=1)
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--max-blocks", type=int, default=200)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
+    if args.all:
+        out_dir = args.out or Path("data/labels")
+        label_corpus(
+            radius=args.radius,
+            workers=args.workers,
+            out_dir=out_dir,
+            max_blocks=args.max_blocks,
+        )
+        print(f"\nwrote {out_dir}")
+        return
+
     result = label_k1(args.machine, radius=args.radius, workers=args.workers)
     print(_report(result))
-
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        payload = asdict(result)
-        payload["success_rate"] = result.success_rate
-        args.out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+        save(result, args.out)
         print(f"\nwrote {args.out}")
 
 

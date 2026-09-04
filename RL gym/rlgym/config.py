@@ -1,0 +1,164 @@
+"""Every knob, in one place - md/ALPHAZERO.md and the build plan's deferred-decision table.
+
+The point of this file is that **no deferred decision is settled in code**. Each one that the
+plan lists as "decide it by measuring the net effect" appears here as a field with the
+default that reproduces today's behaviour, so turning it on is a config edit and turning it
+off again is a config edit, and both are recorded in the metrics row.
+
+    open problem                     knob                  default
+    binary reward is 313:1 cargo     reward_cargo          1.0   (= today: cargo counts fully)
+    policy-target ageing             policy_age_decay      0.0   (= flat, no ageing)
+    root oversampling                root_weight           1.0   (= no down-weight)
+    top-M search restriction         search_top_m          0     (= unrestricted)
+    graph build cost                 tick_cap              32
+    d_model / T / heads              d_model, n_rounds...  128 / 8 / 4
+
+Load with `Config.load(path)`; a JSON file need only carry the fields it overrides.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+
+
+@dataclass
+class NetConfig:
+    """Part 3. **The invariant: no field here may depend on machine size, cells or ticks.**"""
+
+    d_model: int = 128
+    n_heads: int = 4
+    d_ff: int = 512
+    n_rounds: int = 8  # T - trunk applications, all sharing one block's weights (point 10)
+    tie_trunk: bool = True
+    dropout: float = 0.0
+    # Recompute each trunk round in the backward pass instead of storing it. Attention gathers
+    # q, k and v per EDGE, so one round of a 430,000-edge batch holds ~660 MB and eight rounds
+    # exhausted memory (measured: the process segfaults, it does not raise). Costs ~33% more
+    # compute for 8x less memory, which is the right trade on CPU where memory is the wall.
+    checkpoint_trunk: bool = True
+
+    def __post_init__(self) -> None:
+        if self.d_model % self.n_heads:
+            raise ValueError(
+                f"d_model {self.d_model} must divide into {self.n_heads} heads"
+            )
+
+
+@dataclass
+class TrainConfig:
+    """Part 5. The loss is `w_v.BCE(v,z) + w_p.CE(p,pi) + w_B.BCE(B,b) + w_D.CE(D,d)`."""
+
+    lr: float = 3e-4
+    weight_decay: float = 1e-4
+    steps: int = 400
+    warmup_steps: int = 20
+    batch_machines: int = 2  # root graphs per step
+    value_states_per_machine: int = 8  # noted terminals sampled per machine per step
+    # Memory for the backward pass scales with edges x n_rounds, and machines span 519 to
+    # 15,647 items - so an unbounded step segfaults, measured, on a draw of two large machines.
+    # ONE budget covering roots and terminals alike; the first root is always admitted.
+    max_items_per_step: int = 14000
+    grad_clip: float = 1.0
+
+    w_policy: float = 1.0
+    w_value: float = 1.0
+    w_blocks: float = 0.25  # B - auxiliary, deliberately small
+    w_reason: float = 0.25  # D - auxiliary
+
+    # Point 14 stands for the value head alone: z is unbalanced, so the positive term is
+    # scaled by the OBSERVED rate rather than by a guessed constant. 0.0 disables it.
+    value_pos_weight: float = 0.0  # 0 = compute from the batch
+
+    # --- the deferred decisions, as knobs ---------------------------------------------
+    reward_cargo: float = 1.0
+    root_weight: float = 1.0
+    policy_age_decay: float = 0.0
+
+    eval_every: int = 25
+    eval_budget: int = 100
+    seed: int = 0
+
+
+@dataclass
+class SearchConfig:
+    """Part 4. Budget is counted in **simulator calls**, never iterations."""
+
+    c_puct: float = 1.25
+    simulations: int = 200  # simulator calls per episode, the currency of every comparison
+    dirichlet_alpha: float = 0.0  # 0 = derive as 10/actions, per AlphaZero's own scaling
+    dirichlet_weight: float = 0.25
+    temperature: float = 1.0
+    search_top_m: int = 0  # 0 = unrestricted. The measurement is recall@B with it on and off
+    k: int = 2
+    reuse_subtree: bool = True
+
+
+@dataclass
+class LoopConfig:
+    """Part 6. The three-way split, and the 5% that must stay genuinely uninformed."""
+
+    rounds: int = 10
+    episodes_per_round: int = 8
+    share_top: float = 0.60
+    share_sampled: float = 0.35
+    share_uninformed: float = 0.05
+    train_steps_per_round: int = 50
+    cargo_may_enter_library: bool = False  # Part 6: building on cargo compounds
+    seed: int = 0
+
+    def shares(self) -> tuple[float, float, float]:
+        total = self.share_top + self.share_sampled + self.share_uninformed
+        if total <= 0:
+            raise ValueError("budget shares must sum to something positive")
+        return (
+            self.share_top / total,
+            self.share_sampled / total,
+            self.share_uninformed / total,
+        )
+
+
+@dataclass
+class Config:
+    net: NetConfig = field(default_factory=NetConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
+    loop: LoopConfig = field(default_factory=LoopConfig)
+
+    radius: int = 1  # the 2-cell shell is a hyperparameter; 1 until everything is verified
+    tick_cap: int = 32
+    labels_dir: Path = Path("data/labels")
+    graphs_dir: Path = Path("data/graphs")
+    runs_dir: Path = Path("data/runs")
+
+    @classmethod
+    def load(cls, path: Path | str | None) -> "Config":
+        config = cls()
+        if path is None:
+            return config
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return config.merged(payload)
+
+    def merged(self, payload: dict) -> "Config":
+        """Overlay a partial dict. Unknown keys are refused rather than ignored - a typo in a
+        config is otherwise a silent no-op that looks like the knob having no effect."""
+        out = Config(
+            net=NetConfig(**{**asdict(self.net), **payload.get("net", {})}),
+            train=TrainConfig(**{**asdict(self.train), **payload.get("train", {})}),
+            search=SearchConfig(**{**asdict(self.search), **payload.get("search", {})}),
+            loop=LoopConfig(**{**asdict(self.loop), **payload.get("loop", {})}),
+        )
+        known = {f.name for f in fields(Config)}
+        for key, value in payload.items():
+            if key in ("net", "train", "search", "loop") or key.startswith("_"):
+                continue  # "_" keys are comments; JSON has none of its own
+            if key not in known:
+                raise ValueError(f"unknown config key {key!r}")
+            setattr(out, key, Path(value) if key.endswith("_dir") else value)
+        return out
+
+    def to_json(self) -> dict:
+        payload = asdict(self)
+        for key in ("labels_dir", "graphs_dir", "runs_dir"):
+            payload[key] = str(payload[key])
+        return payload

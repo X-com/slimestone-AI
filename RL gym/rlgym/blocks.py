@@ -149,3 +149,73 @@ def _build_palette() -> list[PaletteEntry | None]:
 PALETTE: tuple[PaletteEntry | None, ...] = tuple(_build_palette())
 LIVE_SLOTS = tuple(i for i, entry in enumerate(PALETTE) if entry is not None)
 RESERVED_SLOTS = tuple(i for i, entry in enumerate(PALETTE) if entry is None)
+
+
+# --- BlockData lookups, mirroring cpp simulator/src/block_registry.cpp ---------------------
+#
+# DECISIONS.md point 1 calls these the "worked out from block type by table lookup" features:
+# supplied from a preset table rather than learned, because the simulator already knows them and
+# making the model rediscover them from examples wastes data it does not have.
+
+PUSH_NORMAL = 0
+PUSH_BLOCK = 1
+PUSH_DESTROY = 2
+PUSH_ONLY = 3
+
+_NORMAL_CUBES = frozenset({
+    1, 2, 3, 4, 5, 7, 12, 13, 14, 15, 16, 17, 19, 21, 22, 24, 35, 41, 42, 43, 45, 47, 48, 56,
+    57, 58, 61, 62, 73, 74, 80, 82, 87, 88, 97, 98, 99, 100, 110, 112, 121, 123, 124, 125, 129,
+    133, 137, 159, 162, 165, 166, 168, 170, 172, 173, 174, 179, 181, 201, 202, 204, 206, 210,
+    211, 213, 214, 215, 216, 251, 252, 255,
+})
+_DESTROY = frozenset({
+    6, 8, 9, 10, 11, 18, 26, 30, 31, 32, 37, 38, 39, 40, 50, 51, 55, 64, 65, 70, 71, 72, 75, 76,
+    78, 81, 83, 86, 91, 92, 93, 94, 103, 104, 105, 106, 115, 122, 127, 131, 132, 140, 143, 147,
+    148, 175, 193, 194, 195, 196, 197, 199, 200, 207, 217, 219, 220, 221, 222, 223, 224, 225,
+    226, 227, 228, 229, 230, 231, 232, 233, 234,
+})
+_PUSH_BLOCKED = frozenset({7, 90, 119, 145, 166, 209})
+_GLAZED = frozenset(range(235, 251))
+# hardness -1 in the registry, plus obsidian, which piston.cpp:18 hardcodes exactly as vanilla
+# BlockPistonBase.canPush:384 does. Extended pistons are immovable too, but that is a state
+# property rather than a block-id one and is handled from the meta bit.
+_IMMOVABLE = frozenset({7, 49, 90, 119, 120, 137, 166, 209, 210, 211, 255})
+_PROVIDES_POWER = frozenset({BLOCK_REDSTONE_BLOCK, BLOCK_OBSERVER})
+_PISTON_FAMILY = frozenset({BLOCK_PISTON, BLOCK_STICKY_PISTON, BLOCK_PISTON_HEAD, 36})
+
+
+def push_reaction(block: int) -> int:
+    if block in _GLAZED:
+        return PUSH_ONLY
+    if block in _PISTON_FAMILY or block in _PUSH_BLOCKED:
+        return PUSH_BLOCK
+    if block in _DESTROY:
+        return PUSH_DESTROY
+    return PUSH_NORMAL
+
+
+def is_normal_cube(block: int) -> bool:
+    """A full opaque cube that does NOT itself provide power - the registry excludes power
+    sources here deliberately, so their own weak output is not shadowed."""
+    return (block in _NORMAL_CUBES or block in _GLAZED) and block not in _PROVIDES_POWER
+
+
+def is_full_block(block: int) -> bool:
+    """Physical support: can a rail sit on this. Unlike is_normal_cube this includes the
+    observer, which things do sit on."""
+    return block in _NORMAL_CUBES or block in _GLAZED or block == BLOCK_OBSERVER
+
+
+def can_provide_power(block: int) -> bool:
+    return block in _PROVIDES_POWER
+
+
+def is_immovable(block: int, meta: int = 0) -> bool:
+    """An extended piston is immovable while extended; every other case is by block id."""
+    if block in _PISTON_FAMILY and (meta & EXTENDED_BIT):
+        return True
+    return block in _IMMOVABLE or block in _PUSH_BLOCKED
+
+
+def is_sticky(block: int) -> bool:
+    return block == BLOCK_SLIME

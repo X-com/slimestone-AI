@@ -49,16 +49,14 @@ def test_replay_raises_on_an_inconsistency(engine_record):
     caught, or the check is decoration."""
     events = list(engine_record.events)
     index = next(i for i, e in enumerate(events) if e.kind == BLOCK_STATE_CHANGED)
-    broken = Record(
-        footer=engine_record.footer,
-        summary=engine_record.summary,
-        initial=engine_record.initial,
+    import dataclasses
+
+    broken = dataclasses.replace(
+        engine_record,
         events=[
-            e if i != index else type(e)(**{**e.__dict__, "target_key": e.target_key + 1})
+            e if i != index else dataclasses.replace(e, target_key=e.target_key + 1)
             for i, e in enumerate(events)
         ],
-        push_groups=engine_record.push_groups,
-        push_members=engine_record.push_members,
     )
     with pytest.raises(ReplayError, match="overwrites state"):
         replay(broken)

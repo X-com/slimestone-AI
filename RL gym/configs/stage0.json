@@ -1,0 +1,8 @@
+{
+ "_": "Stage 0 - supervised on the exhaustive k=1 corpus. No search. See md/ALPHAZERO.md Part 8.",
+ "train": {
+  "steps": 400,
+  "eval_every": 25,
+  "reward_cargo": 1.0
+ }
+}
