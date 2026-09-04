@@ -387,11 +387,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("machine", nargs="?", default="simple_observer_engine")
     parser.add_argument("--all", action="store_true", help="sweep the whole small corpus")
+    parser.add_argument(
+        "--k2", action="store_true", help="exhaustive k=2 ground truth for MILESTONE 3"
+    )
     parser.add_argument("--radius", type=int, default=1)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--max-blocks", type=int, default=200)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+
+    if args.k2:
+        truth = label_k2(args.machine, radius=args.radius, workers=args.workers)
+        for line in (
+            f"machine            {truth.machine}",
+            f"unordered pairs    {truth.pairs}",
+            f"unique machines    {truth.unique}",
+            f"WORKING            {truth.working}  = {truth.working_rate * 100:.2f}%",
+            f"NON-CARGO          {truth.non_cargo}  = {truth.non_cargo_rate * 100:.3f}%",
+            f"wall time          {truth.wall_seconds}s",
+        ):
+            print(line)
+        path = args.out or Path(f"data/k2/{args.machine}.json")
+        save_ground_truth(truth, path)
+        print(f"wrote {path}")
+        return
 
     if args.all:
         out_dir = args.out or Path("data/labels")
@@ -410,6 +429,184 @@ def main() -> None:
         save(result, args.out)
         print(f"\nwrote {args.out}")
 
+
+
+
+# --- exhaustive k=2, the Stage 1 test set ---------------------------------------------------
+#
+# ALPHAZERO.md Part 8: "k=2 is affordable once, as an exact test set rather than a strategy."
+# ~460,000 unordered pairs on a 6-block machine, ~10 minutes. That is the only thing that makes
+# MILESTONE 3 possible - recall@B needs a denominator, and search cannot provide one.
+
+
+@dataclass
+class GroundTruth:
+    """Every k-block modification of one machine, by structure hash.
+
+    Hashes rather than action pairs, deliberately. Different pairs reach the same machine, and
+    what a search "found" is a machine, not a route to it - so counting routes would let a
+    search claim credit twice for one discovery.
+    """
+
+    machine: str
+    radius: int
+    k: int
+    pairs: int  # unordered action pairs enumerated
+    unique: int  # distinct machines among them
+    working: int
+    non_cargo: int
+    base_period: int
+    base_shift: tuple[int, int, int]
+    working_hashes: set[str] = field(default_factory=set)
+    non_cargo_hashes: set[str] = field(default_factory=set)
+    wall_seconds: float = 0.0
+
+    @property
+    def working_rate(self) -> float:
+        return self.working / self.unique if self.unique else 0.0
+
+    @property
+    def non_cargo_rate(self) -> float:
+        return self.non_cargo / self.unique if self.unique else 0.0
+
+
+def enumerate_k2(machine: Machine) -> list[tuple[int, int]]:
+    """Every legal unordered pair of placements.
+
+    Unordered because the legality mask hides cells already written this episode, which makes a
+    set of placements order-independent by construction - point 23's factorial duplicate
+    explosion is killed structurally rather than caught by a hash afterwards.
+
+    A pair is included if EITHER order is legal. The two can genuinely differ: placing a first
+    can make b a no-op, and so masked, while the reverse order is fine. Dropping such a pair
+    would silently shrink the denominator recall@B is measured against.
+    """
+    root = GameState(machine, k=2)
+    first = root.legal_mask()
+    actions = [index for index, legal in enumerate(first) if legal]
+    after = {
+        action: root.step(decode_action(action, machine.cell_list)).legal_mask()
+        for action in actions
+    }
+    out: list[tuple[int, int]] = []
+    for position, a in enumerate(actions):
+        mask_a = after[a]
+        for b in actions[position + 1 :]:
+            if mask_a[b] or after[b][a]:
+                out.append((a, b))
+    return out
+
+
+def label_k2(
+    name: str,
+    radius: int = 1,
+    workers: int = 12,
+    chunk: int = 20000,
+    config: SimConfig | None = None,
+    limit: int | None = None,
+    quiet: bool = False,
+) -> GroundTruth:
+    """Simulate every k=2 modification of one machine.
+
+    Chunked, because holding ~460,000 candidate dicts at once is hundreds of megabytes for no
+    reason: only the verdict is kept, and only as a hash.
+    """
+    fixture = load_fixture(name)
+    machine = Machine.from_candidate(fixture, radius=radius)
+    pairs = enumerate_k2(machine)
+    if limit is not None:
+        pairs = pairs[:limit]
+
+    base = simulate_all([machine.to_candidate(cid=-1)], workers=workers, config=config)[0]
+    if not base.get("validCycle"):
+        raise ValueError(
+            f"Base machine {name} has no valid cycle; every label would be measured against a "
+            "broken reference."
+        )
+    base_period = int(base.get("period", 0))
+    raw = base.get("finalShift") or {"x": 0, "y": 0, "z": 0}
+    base_shift = (raw["x"], raw["y"], raw["z"])
+    base_hash = canonical_hash(machine.to_candidate())
+
+    seen: set[str] = set()
+    working: set[str] = set()
+    non_cargo: set[str] = set()
+    started = time.perf_counter()
+    pending: list[Candidate] = []
+    hashes: list[str] = []
+    done = 0
+
+    def flush() -> None:
+        nonlocal pending, hashes
+        if not pending:
+            return
+        for result in simulate_all(pending, workers=workers, config=config):
+            digest = hashes[result["id"]]
+            if not result.get("validCycle"):
+                continue
+            working.add(digest)
+            period = int(result.get("period", 0))
+            shift_raw = result.get("finalShift") or {"x": 0, "y": 0, "z": 0}
+            shift = (shift_raw["x"], shift_raw["y"], shift_raw["z"])
+            if period != base_period or shift != base_shift:
+                non_cargo.add(digest)
+        pending, hashes = [], []
+
+    for a, b in pairs:
+        state = GameState(machine, k=2)
+        cells = (
+            state.step(decode_action(a, machine.cell_list))
+            .step(decode_action(b, machine.cell_list))
+            .current_cells()
+        )
+        candidate = machine.to_candidate(cells, cid=len(pending))
+        digest = canonical_hash(candidate)
+        done += 1
+        if digest in seen or digest == base_hash:
+            continue
+        seen.add(digest)
+        pending.append(candidate)
+        hashes.append(digest)
+        if len(pending) >= chunk:
+            flush()
+            if not quiet:
+                print(
+                    f"  {done}/{len(pairs)} pairs, {len(seen)} unique, "
+                    f"{len(working)} working, {len(non_cargo)} non-cargo",
+                    flush=True,
+                )
+    flush()
+
+    return GroundTruth(
+        machine=name,
+        radius=radius,
+        k=2,
+        pairs=len(pairs),
+        unique=len(seen),
+        working=len(working),
+        non_cargo=len(non_cargo),
+        base_period=base_period,
+        base_shift=base_shift,
+        working_hashes=working,
+        non_cargo_hashes=non_cargo,
+        wall_seconds=round(time.perf_counter() - started, 1),
+    )
+
+
+def save_ground_truth(truth: GroundTruth, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = asdict(truth)
+    payload["working_hashes"] = sorted(truth.working_hashes)
+    payload["non_cargo_hashes"] = sorted(truth.non_cargo_hashes)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def load_ground_truth(path: Path) -> GroundTruth:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["base_shift"] = tuple(payload["base_shift"])
+    payload["working_hashes"] = set(payload["working_hashes"])
+    payload["non_cargo_hashes"] = set(payload["non_cargo_hashes"])
+    return GroundTruth(**payload)
 
 if __name__ == "__main__":
     main()

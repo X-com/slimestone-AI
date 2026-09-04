@@ -88,8 +88,22 @@ non-cargo discovery reverses the machine's flight direction. Full result in `ALP
 
 **Phases B and C are built, and the training loop runs end to end** — network, supervised
 training, PUCT with simulator leaves, the machine library and attempt log, and the outer loop with
-its three-way budget split. `TRAINING.md` is the operating manual: what each file does, how to run
-each stage, and which number to look at.
+its three-way budget split. 215 tests. `TRAINING.md` is the operating manual: what each file does,
+how to run each stage, and which number to look at.
+
+**MILESTONE 2 passed.** Held-out policy AUC **0.800** against baseline 1's **0.659** — the only
+baseline that transfers. Train (0.825) and held-out (0.800) track within 0.025, which is the
+"it generalised" row of the diagnosis table rather than the "memorising" one.
+
+**MILESTONE 4 has a number.** Pooled over 10 Stage 1 rounds at k=2:
+
+| | simulator calls | non-cargo found | **non-cargo / 1,000** |
+|---|---|---|---|
+| **model** | 350 | 10 | **28.6** |
+| **uninformed control** | 1,084 | 2 | **1.8** |
+
+**15.9x the control per simulator call.** Full numbers, and the caveat about the model
+re-treading cached ground, in `BENCHMARKS.md`.
 
 **The label corpus exists.** 33 machines, **207,935 exhaustively labelled actions** - every action of
 every small fixture, labelled exactly. That replaces point 17's "train on one machine" with a real

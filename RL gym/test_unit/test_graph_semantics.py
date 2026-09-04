@@ -71,9 +71,23 @@ def _cell_item_map(graph, record, machine):
     # cell items are emitted tick-major, cells sorted within each tick
     ordered = sorted(
         set(k for t in range(span + 1) for k in board_at(boards, t))
-        | set(_shifted_policy(graph, machine, record))
+        | _writable(_shifted_policy(graph, machine, record))
     )
     return out, ordered
+
+
+def _writable(cells):
+    """Policy cells plus their face neighbours - every cell a legal placement can WRITE.
+
+    An extended piston writes its head one step in front of its body, so the encoded region has
+    to reach one further than the action space does. Written out here rather than imported, so
+    that if build() changes the rule this test disagrees with it instead of following it.
+    """
+    steps = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    out = set(cells)
+    for x, y, z in cells:
+        out.update((x + dx, y + dy, z + dz) for dx, dy, dz in steps)
+    return out
 
 
 def _shifted_policy(graph, machine, record):
@@ -125,7 +139,7 @@ def test_the_north_facing_observer_watches_the_cell_to_its_north(built):
     # tick-0 cell items are the first block of items, cells sorted
     cells = sorted(
         set(k for t in range(record.summary.period + 1) for k in board_at(boards, t))
-        | set(_shifted_policy(graph, machine, record))
+        | _writable(_shifted_policy(graph, machine, record))
     )
     index = {cell: i for i, cell in enumerate(cells)}
     src = index[(0, 65, 1)]

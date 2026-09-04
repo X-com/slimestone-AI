@@ -327,7 +327,7 @@ class Net(nn.Module):
         # Two outputs, one used. Output 1 is reserved and unlabelled so that adding a second
         # value later is a config change rather than a shape change that makes every existing
         # checkpoint unloadable at exactly the moment you want to compare against them.
-        self.head_value = nn.Linear(2 * d, 2)
+        self.head_value = nn.Linear(3 * d, 2)  # summary + attention pool + max pool
         self.head_blocks = nn.Linear(d, 1)
         self.head_reason = nn.Linear(d, N_FAILURE_REASONS)
 
@@ -381,7 +381,27 @@ class Net(nn.Module):
         alpha = segment_softmax(scores, batch.machine_id, batch.n_machines)
         pooled = torch.zeros(batch.n_machines, x.shape[1], dtype=x.dtype, device=x.device)
         pooled.index_add_(0, batch.machine_id, alpha * x)
-        return pooled
+
+        # ...and a max, because attention alone was measured to be not enough. A softmax over
+        # ~1,500 items with O(1) scores is nearly uniform: to put real weight on one item the
+        # query has to grow until scores span log(n) ~ 7, and it does not get there in a few
+        # hundred steps. The first fix moved `v`'s spread from 0.0002 to 0.0006 - still a
+        # constant.
+        #
+        # A max concentrates by construction and needs to learn nothing to do it, and the noted
+        # cell IS the outlier: its vector moves by ~6.0 when everything else moves by ~0.004.
+        # Point 12 rejected max for pooling a cell's TICKS, because a cell can need two ticks
+        # together; that argument does not apply to "is there something unusual here", which is
+        # what `v` needs. The two are concatenated rather than chosen between.
+        peaks = torch.full_like(pooled, float("-inf"))
+        peaks = peaks.scatter_reduce(
+            0,
+            batch.machine_id.unsqueeze(-1).expand_as(x),
+            x,
+            reduce="amax",
+            include_self=True,
+        )
+        return torch.cat([pooled, peaks], dim=-1)
 
     def forward(self, batch: Batch) -> Outputs:
         x = self.encode(batch)

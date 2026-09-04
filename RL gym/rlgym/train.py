@@ -262,7 +262,19 @@ def value_calibration(net: Net, data: MachineData, rng: random.Random, n: int = 
         chunk = graphs[start : start + per_chunk]
         predictions.extend(net(make_batch(chunk)).value.tolist())
     outcomes = [float(data.rewards[a]) for a in sample]
-    table = []
+    # The spread is reported first and separately, because the bin table hides the exact failure
+    # it exists to catch: a `v` that is constant at 0.44 puts every sample in one 0.2-wide bin
+    # and looks like a mildly miscalibrated model rather than a head that ranks nothing. Measured
+    # at 0.0002 before the value pooling was added.
+    spread = max(predictions) - min(predictions)
+    positives = [p for p, o in zip(predictions, outcomes) if o > 0]
+    negatives = [p for p, o in zip(predictions, outcomes) if o <= 0]
+    separation = (
+        (sum(positives) / len(positives)) - (sum(negatives) / len(negatives))
+        if positives and negatives
+        else 0.0
+    )
+    table = [{"spread": round(spread, 5), "separation": round(separation, 5), "n": len(sample)}]
     for index in range(bins):
         low, high = index / bins, (index + 1) / bins
         picked = [
@@ -372,6 +384,20 @@ def train(config: Config, out_dir: Path, corpus=None, quiet: bool = False) -> di
     if not training:
         raise SystemExit("no training machines - the whole corpus is in HELD_OUT")
 
+    # A machine refused by the tick cap disappears from the split, and until this was reported
+    # the loss was silent: HELD_OUT names 7 machines, 6 load, and every "held-out AUC" was an
+    # average over 6 without saying so. A skip is loud in a log line and invisible in a result,
+    # which is the wrong way round - so it goes in the metrics and in the header.
+    skipped = dict(getattr(load_corpus, "skipped", {}))
+    missing_held = sorted(set(HELD_OUT) - set(corpus))
+    metrics_context = {
+        "machines_used": len(corpus),
+        "machines_skipped": skipped,
+        "held_out_declared": len(HELD_OUT),
+        "held_out_used": len(held),
+        "held_out_missing": missing_held,
+    }
+
     # Evaluation forwards a whole machine per call, so the training side is sampled while the
     # held-out side never is. Held-out is the number that decides anything.
     eval_train = training[:: max(1, len(training) // 6)][:6]
@@ -382,13 +408,20 @@ def train(config: Config, out_dir: Path, corpus=None, quiet: bool = False) -> di
         net.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay
     )
     metrics = Metrics(
-        out_dir / "metrics.jsonl", {"config": config.to_json(), "params": net.n_parameters()}
+        out_dir / "metrics.jsonl",
+        {"config": config.to_json(), "params": net.n_parameters(), **metrics_context},
     )
     bars = baseline_reference(corpus, training, held, config.train.eval_budget)
     metrics.log("baseline", **bars)
 
     if not quiet:
         print(f"machines: {len(training)} training, {len(held)} held out")
+        if skipped:
+            print(
+                f"  SKIPPED {len(skipped)}: {', '.join(sorted(skipped))}"
+                + (f"   <- {len(missing_held)} of them held-out: {', '.join(missing_held)}"
+                   if missing_held else "")
+            )
         print(f"parameters: {net.n_parameters():,}")
         print(
             f"baseline 1  train auc {bars['train']['auc']:.3f}   "

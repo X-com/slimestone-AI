@@ -1,15 +1,15 @@
 {
- "_": "Stage 1 - PUCT with ground-truth leaves at k=2. Budget is counted in simulator calls.",
+ "_": "Stage 1 - PUCT with ground-truth leaves at k=2. Budget is counted in simulator calls. 120 calls per episode keeps a round to a few minutes on CPU, where the NETWORK is the bottleneck, not the simulator - see md/TRAINING.md.",
  "search": {
   "k": 2,
-  "simulations": 200,
+  "simulations": 120,
   "c_puct": 1.25,
   "temperature": 1.0,
   "search_top_m": 0
  },
  "loop": {
-  "rounds": 20,
+  "rounds": 10,
   "episodes_per_round": 8,
-  "train_steps_per_round": 30
+  "train_steps_per_round": 20
  }
 }

@@ -225,6 +225,7 @@ def load_corpus(
             f"no label files in {labels_dir} - run: py -m rlgym.labeller --all --out {labels_dir}"
         )
     out: dict[str, MachineData] = {}
+    skipped: dict[str, str] = {}
     for path in paths:
         try:
             out[path.stem] = machine_data(
@@ -236,9 +237,11 @@ def load_corpus(
                 reward_cargo=reward_cargo,
             )
         except Exception as exc:  # a machine over the tick cap, or a stale label file
+            skipped[path.stem] = f"{type(exc).__name__}: {str(exc)[:120]}"
             if verbose:
-                print(f"  skipped {path.stem}: {type(exc).__name__}: {str(exc)[:120]}")
+                print(f"  skipped {path.stem}: {skipped[path.stem]}")
             continue
     if not out:
         raise SystemExit("every machine was skipped - see the messages above")
+    load_corpus.skipped = skipped
     return out

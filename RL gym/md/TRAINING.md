@@ -14,6 +14,7 @@ specification; this is the operating manual for what was built from it.
 | `search.py` | PUCT with simulator leaves |
 | `store.py` | machine library and attempt log — Part 6's two destinations |
 | `loop.py` | the outer loop — machine choice, budget split, cargo filter, retraining |
+| `recall.py` | MILESTONE 3 — recall@B against exhaustive k=2 ground truth |
 | `metrics.py` | one JSONL row per evaluation, carrying the whole config |
 | `bench.py` | timing, never fails the build |
 
@@ -24,6 +25,8 @@ py -m rlgym.labeller --all --out data/labels        # once, ~20 min. The corpus.
 py -m rlgym.baselines --budget 100                  # the ladder rungs 0-3. The bar.
 py -m rlgym.train --config configs/stage0.json      # Stage 0. Supervised, no search.
 py -m rlgym.loop  --config configs/stage1.json --checkpoint data/runs/stage0/best.pt
+py -m rlgym.labeller simple_machine2 --k2           # once, ~25 min. MILESTONE 3's denominator.
+py -m rlgym.recall --budget 1000                    # MILESTONE 3. Recall against that.
 py bench.py
 py -m pytest test_unit                              # everything
 ```
@@ -131,6 +134,23 @@ carried block hashes differently and trivial growth registers as discovery. That
 the GA convinced itself it was working. Size rising means the loop is running, nothing more. The
 `library` field also reports generation spread and descendants-per-root, which is where a
 narrowing search actually shows.
+
+## The one measurement with a denominator
+
+Every other number here is relative — the ladder against frequency tables, the loop against a
+control. **Recall@B is the only one that knows what there was to find.** Of the N working 2-block
+modifications that exist on a machine, how many did B simulator calls actually find?
+
+That denominator is `py -m rlgym.labeller <machine> --k2`: about 25 minutes of CPU, once per
+machine, forever. It is a **test set and never a strategy** — the same enumeration is 3.8 days at
+k=3 and roughly twelve thousand years at k=5.
+
+Two things the measurement does deliberately:
+
+- **Counts hashes, not routes.** A discovery is a machine, not a path to it. Different action
+  pairs reach the same machine, and counting routes would let a search claim one discovery twice.
+- **Gives each side its own transposition cache.** Sharing one would let whichever ran second
+  inherit the other's answers for free and look dramatically better for no reason but ordering.
 
 ## The knobs that exist to be measured
 
