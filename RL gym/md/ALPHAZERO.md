@@ -1031,9 +1031,8 @@ PHASE A — no model, no C++ changes                                            
    game.py -> sim.py -> labeller.py       + test_unit/ (98 tests)
    +------> MILESTONE 1: 31.78% raw, 0.10% non-cargo
 
-PHASE B — needs the C++ snapshot flag
-   C++ per-tick snapshots (point 27) --+
-   record decoder (copied, point 26) --+--> graph.py -> net.py -> train.py
+PHASE B — no C++ change needed (point 27 reversed)
+   record.py -> boards.py -> graph.py -> net.py -> train.py    [record.py, boards.py DONE]
    +------> MILESTONE 2 / Stage 0 gate: v calibrated, p beats a uniform prior on a held-out machine
 
 PHASE C
@@ -1044,10 +1043,14 @@ PHASE C
 
 | file | contents |
 |---|---|
-| `rlgym/game.py` | Part 2 — palette, action enumeration, legality masks, encoding, `canonical_hash` |
+| `rlgym/blocks.py` | block ids, meta conventions, the 39-in-48 palette |
+| `rlgym/game.py` | Part 2 — action enumeration, legality masks, encoding, `canonical_hash` |
 | `rlgym/sim.py` | simulator process pool — **must carry over the MinGW PATH fix** or every candidate dies silently with no error output |
 | `rlgym/labeller.py` | exhaustive k=1 / k=2 — Stage 0 data and Stage 1 test sets |
-| `rlgym/graph.py` | record + snapshots + placements -> graph (Part 3) |
+| `rlgym/record.py` | .simlog decoder (SDLA / format 10), copied layouts from `sim_event_log.h` |
+| `rlgym/simlog.py` | producing records for a batch, via `--simulation-data` |
+| `rlgym/boards.py` | per-tick board state by replaying `BlockStateChanged`, self-checking |
+| `rlgym/graph.py` | record + boards + placements -> graph (Part 3) |
 | `rlgym/net.py` | trunk + `p` / `v` / `B` / `D` heads (Part 3) |
 | `rlgym/train.py` | losses and weighting (Part 5) |
 | `rlgym/search.py` | swappable: stage 0 none, stage 1 PUCT + sim leaves, stage 2 PUCT + value leaves |
@@ -1056,16 +1059,54 @@ PHASE C
 `store.py` waits because Milestone 1 is a one-off run whose output is a JSON dump; a machine index and
 append-only attempt log are what the *loop* needs, and there is no loop until search exists.
 
-## Which C++ change blocks what
+## Which C++ change blocks what — REVISED, none of them
 
 | change | blocks | why |
 |---|---|---|
-| **per-tick snapshots** (point 27) | **Phase B** | cell items are "what is at this cell at this tick"; the Python replay alternative was rejected |
-| records to stdout (point 25) | **nothing until Stage 1** | a throughput fix. Phase A writes no sim-logs; Stage 0 writes ~1,250 files once per machine — seconds of churn. It matters when the loop runs at 1,000/sec for days |
+| ~~per-tick snapshots~~ (point 27) | **nothing — not needed at all** | see below |
+| records to stdout (point 25) | **nothing until Stage 1** | a throughput fix. Phase A writes no sim-logs; Stage 0 writes a few thousand files once — seconds of churn. It matters when the loop runs at 1,000/sec for days |
 | framing + binary mode | ships with the stdout change | — |
 
-**Only one of the three C++ changes is on the critical path**, and it is not the one that started as the
-headline.
+**No C++ change is on the critical path.** The simulator — the one component that is verified
+byte-for-byte against an independent Java engine — is left completely untouched.
+
+### Point 27 reversed: the snapshot flag is unnecessary
+
+Point 27 decided the C++ should emit per-tick snapshots because rebuilding state in Python
+*"is a reimplementation of logic the C++ already performs, two implementations must be kept in step,
+and `check_state_builder.py` exists precisely because they can drift"*.
+
+That is true of `transformer_gym/state.py`'s `apply_tick`, which reimplements piston physics, flight
+settling and sticky-drag rules. **It is false of `BlockStateChanged` (kind 22)**, which
+`sim_event_log.h` calls the replication backstop:
+
+> *Emitted from inside `setBlockState` for EVERY world write that actually changes something, whatever
+> rule caused it. So world state at any point == `InitialBlockState` with every `BlockStateChanged` up
+> to that `globalSeq` applied in order — **no rule needs re-implementing and no future rule can silently
+> escape the log.***
+
+`simulator.cpp:2074` confirms the shape: `from == to ==` the written position, `targetKey` = the old
+raw state, `reserved2` = the new one, emitted *before* any cascade. So per-tick state is a dictionary
+assignment in `globalSeq` order. **There is no logic to keep in step because there is no logic.**
+
+It is also self-checking, which the snapshot approach would not have been. Every record carries the old
+state it overwrites, so asserting the board already holds that value means **a single missing write
+cannot hide** — the next write at that cell would disagree. That is
+`check_log_completeness.py`'s REPLAY argument, reused unchanged.
+
+**Measured: zero old-state mismatches across all 46 fixtures that produce a record.** On
+`simple_observer_engine`, whose run is exactly one period, the replayed board also equals the initial
+board translated by the summary's `netShift` — an independent agreement between the event stream and
+the `RunSummary`, which different code computes.
+
+Three things fall out:
+
+- **Phase B has no blocker**; `rlgym/boards.py` is ~120 lines and needs nothing from C++.
+- The snapshot section would have been **new C++ outside the Java comparator's coverage** — Java emits
+  no snapshots, so nothing could have checked it except a Python replay, which is what we have instead.
+- On a large machine snapshots would have been *bigger* than the events they replaced (`ALPHAZERO.md`
+  estimated 54 MB of events versus ~200 MB of snapshots for `1797 onepointfive`). That tradeoff is now
+  moot rather than managed by a flag.
 
 ---
 

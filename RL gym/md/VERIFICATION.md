@@ -42,7 +42,9 @@ py -m pytest test_unit -m "not slow"   # no simulator    78 tests,  0.17s
 | hashing | invariants — translation, ordering, trigger, rotation |
 | `sim.py` | **batch-independence** and determinism |
 | the whole Phase A path | **the no-op identity test** |
-| `graph.py` (Phase B) | **events replayed must reproduce the snapshots** |
+| `record.py` | struct sizes against the C++ `static_assert`s; summary against the stdout verdict |
+| `boards.py` | **the write stream checks itself** — every write states what it overwrites |
+| `graph.py` (Phase B) | hand-written semantic assertions; there is no oracle |
 | `net.py` (Phase B) | **batch-independence**, masking exactness, gradient flow, overfit-one |
 | `search.py` (Phase C) | conservation laws, and the PUCT worked example as a literal test |
 | the loop | recall@B **below random is a bug, not a modelling result** |
@@ -69,16 +71,29 @@ The network half is the same shape: machine A alone versus A concatenated with B
 "one summary per machine, never shared" — two failures that make training look *better* than it
 is, then collapse on a machine evaluated alone.
 
-### 3. Events replay equals snapshots (Phase B)
+### 3. The write-stream replay is self-checking (`test_boards.py`)
 
-**The three C++ changes land outside the Java comparator's coverage.** Java emits no snapshots,
-and point 25 keeps file mode *because* the harness reads record files — leaving the new stdout
-path unchecked too. Each change needs its own:
+Every `BlockStateChanged` carries the **old** state it overwrites, so replaying and asserting the
+board already holds that value means **a single missing write cannot hide** — the next write at
+that cell would disagree. `check_log_completeness.py`'s REPLAY argument, reused unchanged.
 
-| C++ change | its check |
-|---|---|
-| per-tick snapshots (point 27) | replay events from `InitialBlockState`, assert every snapshot matches |
-| records to stdout (point 25) | same candidate via file mode and stdout mode -> **identical bytes** |
+This is on **by default in `boards.py`, not only in a test**: it costs one comparison per write
+and it is the entire basis for trusting the result. `test_boards.py` also corrupts one event's
+old-state field and asserts the check fires, because a self-check that cannot fail is decoration.
+
+A second, independent confirmation: on a machine whose run is exactly one period, the replayed
+board must equal the initial board translated by the summary's `netShift` — comparing the event
+stream against the `RunSummary`, which different code computes.
+
+**Measured: zero mismatches across all 46 fixtures that produce a record.**
+
+This is what reversed point 27 and removed the last C++ change from the critical path — see
+`ALPHAZERO.md`. It also removes the verification problem that change would have created: Java
+emits no snapshots, so **nothing could have checked new snapshot code except a Python replay**,
+which is what we have instead. The remaining C++ change, records to stdout (point 25), still
+needs its own check when it happens — same candidate via file mode and stdout mode, identical
+bytes — because point 25 keeps file mode precisely *because* the Java harness reads record files,
+so the stdout path would otherwise be uncovered.
 
 ## What Phase A actually caught
 
@@ -90,6 +105,7 @@ Verification is only worth the words if it finds things. It found four:
 | 2 | truncated-record test read scrambled bytes | **a test bug with a product lesson** — the drain thread and the test were both reading one pipe, interleaving characters. `stdout` must only ever be read through the queue, so `read_raw_line` now exists and reading `process.stdout` directly is documented as forbidden |
 | 3 | 212 sims/sec instead of ~1,000 | **a product bug** — a fixed 512 chunk meant 988 candidates became two chunks, so ten of twelve workers sat idle. Chunk size is now derived from the workload; 572 sims/sec |
 | 4 | `python_overhead_ms` reported negative | **a product bug** — wall time was compared against the *sum* of `elapsedNs` across parallel workers. The diagnostic was removed rather than corrected, since the two are not comparable once workers > 1 |
+| 5 | replaying the write stream matched perfectly on every fixture | **a design error** — point 27's premise did not hold, and a planned C++ change was unnecessary. Reversed; see `ALPHAZERO.md` |
 
 Two of the four were mistakes in the tests themselves, which is the expected ratio and the
 reason the expected values are hand-derived: a test that computes its expectation from the code

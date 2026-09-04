@@ -85,8 +85,18 @@ Both branches of the plan's decision table fired at once. 99.7% of the positive 
 riding along, so **a graded reward is now the highest-value open item**, not a refinement. The single
 non-cargo discovery reverses the machine's flight direction. Full result in `ALPHAZERO.md`.
 
-Next is **Phase B**, which needs the per-tick snapshot flag in the C++ simulator — the only one of the
-three C++ changes on the critical path.
+**Phase B has started**, and it turned out to need no C++ change at all. `rlgym/record.py`,
+`rlgym/simlog.py` and `rlgym/boards.py` are built; 117 tests pass.
+
+**Point 27 is reversed.** It called for per-tick snapshots from the C++ simulator because rebuilding
+state in Python would reimplement physics. That is true of `transformer_gym/state.py`, and false of
+`BlockStateChanged` — the log's replication backstop, which records every world write with the old and
+new state, so replay is a dictionary assignment with no logic to keep in step. It is also self-checking:
+every write states what it overwrites, so a missing write cannot hide. **Zero mismatches across all 46
+fixtures.** No C++ change is on the critical path, and the byte-for-byte Java-verified simulator stays
+untouched.
+
+Next: `graph.py`, then the network.
 
 ---
 
