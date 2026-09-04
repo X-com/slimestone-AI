@@ -14,16 +14,17 @@ simulator, and improves from the results.
 
 ## The loop
 
-At each step the model scores **every** legal placement and picks one. At single-block scale that is
-about 1,350 options — cheap enough to score in a single pass, so "the model chooses" is literal.
-Multi-block is the same step repeated: place a block, re-score everything, place the next.
+At each step the model scores **every** legal placement and picks one — about **1,250 options** with a
+one-cell candidate shell, ~9,750 with two cells. Cheap enough to score in a single pass, so "the model
+chooses" is literal. Multi-block is the same step repeated: place a block, re-score everything, place
+the next.
 
 Then simulate the result, learn from what happened, and rank better next round.
 
-Randomness enters only as **exploration** — sometimes not taking the top choice, so the model keeps
-seeing things outside its current beliefs. That fraction starts high (an untrained model's ranking is
-meaningless anyway) and decays as it improves. Nothing switches over; it is one loop throughout, with
-the exploration dial turning down.
+Since `ALPHAZERO.md`, the loop is search-guided: the model's scores are a *prior*, tree search improves
+on them, and the model is trained toward what the search found. Randomness enters as **Dirichlet noise
+at the search root** and **temperature on the visit counts**, so the model keeps seeing things outside
+its current beliefs. Both start high and decay. Nothing switches over; it is one loop throughout.
 
 ## What to expect first
 
@@ -38,25 +39,54 @@ the only objective it has, and a block riding along genuinely works. See `OPEN.m
 
 | file | contents |
 |---|---|
+| `ALPHAZERO.md` | **how the model searches and improves — architecture, MCTS, training, build order** |
+| `VERIFICATION.md` | how we tell a broken implementation from a model that is not learning |
 | `QUESTIONS.md` | what each of the 33 design points asks, and why it matters |
-| `DECISIONS.md` | what was decided for each point, with reasons — **the main reference** |
+| `DECISIONS.md` | what was decided for each point — **the main reference for inputs and outputs** |
 | `DEFERRED.md` | problems deliberately left unsolved, with notes for whoever picks them up |
 | `SLOWDOWNS.md` | every identified performance risk, since training speed matters |
 | `DESIGN.md` | the earlier high-level design, written before the 33 points |
 | `OPEN.md` | the earlier high-level deferred items, plus a log of corrections made while planning |
 
-`DESIGN.md` and `OPEN.md` came first and are the shorter overview. **Where they disagree with
-`DECISIONS.md`, `DECISIONS.md` wins** — it was written later and in more detail. The clearest example
-is the relationship kinds: `DESIGN.md` lists five, and the settled answer is seven (power and
-quasi-connectivity were added in point 4).
+**Precedence, newest wins: `ALPHAZERO.md` > `DECISIONS.md` > `DESIGN.md` / `OPEN.md`.**
+
+`DESIGN.md` and `OPEN.md` came first and are the shorter overview. Where they disagree with
+`DECISIONS.md`, `DECISIONS.md` wins — the clearest example is the relationship kinds: `DESIGN.md` lists
+five, and the settled answer is seven (power and quasi-connectivity were added in point 4).
+
+`ALPHAZERO.md` came last. It overturns `DESIGN.md`'s rejection of AlphaZero in favour of beam search,
+because beam search yields a ranked list rather than a distribution and so **cannot produce a training
+target for the policy**. It also resolves four `DECISIONS.md` points: 11 (the value head conflated two
+different questions), 13 (the weighting crisis largely evaporates), 14 (its machinery is unnecessary on
+the policy side) and 19 ("keep everything" holds for three of four label types, not all four).
 
 ## Status
 
-All 33 design points are settled or explicitly deferred. Three changes to the C++ simulator fall out of
-them — records written to standard output instead of one file per candidate, per-tick board snapshots
-behind a flag, and the framing and binary-mode details both require.
+All 33 design points are settled or explicitly deferred, and `ALPHAZERO.md` settles the search and
+training loop on top of them.
 
-Implementation has not started.
+Three changes to the C++ simulator fall out — records written to standard output instead of one file per
+candidate, per-tick board snapshots behind a flag, and the framing and binary-mode details both require.
+**Only the snapshot flag is on the critical path**; the stdout change is a throughput fix that matters
+only once the loop runs continuously.
+
+**Phase A is built and Milestone 1 has run.** `rlgym/game.py`, `rlgym/sim.py` and `rlgym/labeller.py`,
+with 98 tests in `test_unit/` (78 fast, 20 simulator-driven).
+
+Milestone 1 on `simple_observer_engine` at R=1, all 988 legal single-block modifications:
+
+| | |
+|---|---|
+| working | **314 = 31.78%** |
+| of which cargo (same period and shift as the base) | **313** |
+| **non-cargo working** | **1 = 0.10%** |
+
+Both branches of the plan's decision table fired at once. 99.7% of the positive signal is a block
+riding along, so **a graded reward is now the highest-value open item**, not a refinement. The single
+non-cargo discovery reverses the machine's flight direction. Full result in `ALPHAZERO.md`.
+
+Next is **Phase B**, which needs the per-tick snapshot flag in the C++ simulator — the only one of the
+three C++ changes on the critical path.
 
 ---
 

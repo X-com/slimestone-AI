@@ -1,0 +1,13 @@
+[project]
+name = "rlgym"
+version = "0.1.0"
+description = "AlphaZero-style model that extends Minecraft flying machines. See md/ALPHAZERO.md."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["test_unit"]
+addopts = "-q"
+markers = [
+    "slow: fixture-driven differential checks that shell out to the C++ simulator",
+]
