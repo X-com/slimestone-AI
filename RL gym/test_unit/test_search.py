@@ -338,3 +338,56 @@ def test_a_search_that_exhausts_its_space_terminates(machine):
     search, _ = _search(machine, lambda c: 0.0, k=1, simulations=100_000)
     result = search.run(budget=5_000)
     assert result.simulator_calls < 5_000
+
+
+# --- exploration decay ------------------------------------------------------------------
+
+
+def test_exploration_starts_high_and_decays():
+    """README.md: "Both start high and decay. Nothing switches over; it is one loop throughout."
+
+    Both were fixed constants until this existed, so the loop explored exactly as hard on its
+    last round as on its first - a stated design element that silently was not there.
+    """
+    from rlgym.config import SearchConfig
+
+    base = SearchConfig()
+    first = base.at_round(1, 10)
+    last = base.at_round(10, 10)
+    assert first.temperature == base.temperature
+    assert first.dirichlet_weight == base.dirichlet_weight
+    assert last.temperature == pytest.approx(base.temperature_final)
+    assert last.dirichlet_weight == pytest.approx(base.dirichlet_weight_final)
+
+
+def test_decay_is_monotone_and_never_overshoots():
+    from rlgym.config import SearchConfig
+
+    base = SearchConfig()
+    values = [base.at_round(r, 10) for r in range(1, 11)]
+    temps = [v.temperature for v in values]
+    noise = [v.dirichlet_weight for v in values]
+    assert temps == sorted(temps, reverse=True)
+    assert noise == sorted(noise, reverse=True)
+    assert min(temps) >= base.temperature_final - 1e-9
+    assert min(noise) >= base.dirichlet_weight_final - 1e-9
+
+
+def test_a_single_round_run_explores_at_full_strength():
+    """Every debugging run is a short run. Collapsing to the end of the schedule when there is
+    nowhere to decay to would make exactly those runs the least exploratory ones."""
+    from rlgym.config import SearchConfig
+
+    base = SearchConfig()
+    only = base.at_round(1, 1)
+    assert only.temperature == base.temperature
+    assert only.dirichlet_weight == base.dirichlet_weight
+
+
+def test_decay_is_clamped_past_the_end():
+    """A run longer than `decay_rounds` must hold at the final value, not keep going negative."""
+    from rlgym.config import SearchConfig
+
+    base = SearchConfig(decay_rounds=5)
+    assert base.at_round(20, 20).temperature == pytest.approx(base.temperature_final)
+    assert base.at_round(20, 20).dirichlet_weight == pytest.approx(base.dirichlet_weight_final)

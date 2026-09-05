@@ -159,13 +159,40 @@ That same check independently confirmed the ground truth: of the 1,000 uniformly
 **8 were working by simulation and 8 by ground-truth hash lookup** — the two agree exactly, on a
 sample the enumeration had no way to anticipate.
 
+Raising the budget widens the gap rather than closing it, which is the shape a real prior should
+produce — the model keeps finding new working machines where uniform sampling saturates:
+
+| budget | control recall | model recall | ratio |
+|---|---|---|---|
+| 1,000 | 0.11% (6) | 0.86% (47) | **7.83x** |
+| 6,000 | 0.38% (21) | **3.88% (212)** | **10.10x** |
+
 ### What this measurement cannot yet answer
 
-**Non-cargo recall was 0.00% for both sides, and had to be.** There are 17 non-cargo machines in
-359,712, so 1,000 uniform calls expect 0.05 of them. The model would need roughly 2,700 calls to
-expect one even at its measured 7.8x enrichment. **The headline non-cargo number is not
-measurable on this machine at this budget** — that is a fact about the measurement, not about the
-model, and it is the reason the working-recall column is the one Milestone 3 is judged on.
+**Non-cargo recall was 0.00% for both sides at 1,000 calls and still 0.00% at 6,000.** There are
+17 non-cargo machines in 359,712 — even at the model's 10x enrichment, 6,000 calls expect 0.28 of
+them. Roughly 21,000 calls would be needed to expect a single one.
+
+**The cause is the machine, not the budget.** `simple_machine2` was chosen for Milestone 3 because
+it is the smallest — and it turns out to be the worst possible choice for this particular column:
+
+| machine | k=1 legal actions | non-cargo | rate |
+|---|---|---|---|
+| simple_machine3 | 2,660 | 34 | **1.278%** |
+| simple_no_sticky_loop | 6,232 | 47 | 0.754% |
+| simple_machine1 | 3,648 | 20 | 0.548% |
+| simple_caterpillar | 1,444 | 3 | 0.208% |
+| **simple_machine2** | 874 | **0** | **0.000%** |
+
+**Non-cargo density spans at least 250x across the corpus, and the test machine has none at all
+at k=1.** That is also why the Stage 1 loop reported 28.6 non-cargo per 1,000 calls while this
+machine's entire k=2 space allows at most ~0.5 per 1,000: they are the same metric measured on
+different populations.
+
+**Consequence for the headline number: it is not comparable across machines and must never be
+reported as a single figure from a varying population.** Either fix the machine set or pool over
+a fixed one. Measuring non-cargo recall properly means running the k=2 ground truth on
+`simple_machine3` — about ten times the enumeration, so roughly 80 minutes once.
 
 ## The headline number
 

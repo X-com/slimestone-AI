@@ -93,6 +93,36 @@ class SearchConfig:
     k: int = 2
     reuse_subtree: bool = True
 
+    # Both exploration knobs start high and decay - README.md: "Both start high and decay.
+    # Nothing switches over; it is one loop throughout." They were fixed constants until this
+    # was added, so the loop explored exactly as hard on its last round as on its first.
+    #
+    # Decayed together on purpose. They are the same idea applied at two points: Dirichlet noise
+    # widens what the search LOOKS at, temperature widens what it PLAYS from what it found.
+    # Decaying one without the other gives a search that explores broadly and then commits at
+    # random, or one that looks only where it already believes and then agonises over the choice.
+    temperature_final: float = 0.25
+    dirichlet_weight_final: float = 0.05
+    decay_rounds: int = 0  # 0 = decay across the loop's own round count
+
+    def at_round(self, round_index: int, total_rounds: int) -> "SearchConfig":
+        """This round's exploration settings. Linear, because it is predictable and because
+        nothing here justifies a shape more specific than that yet."""
+        span = self.decay_rounds or max(1, total_rounds)
+        # A one-round run explores at FULL strength, not at the final value. Collapsing to the
+        # end of the schedule when there is nowhere to decay to would silently make every short
+        # run - which is every debugging run - the least exploratory one.
+        progress = min(1.0, max(0.0, (round_index - 1) / (span - 1))) if span > 1 else 0.0
+        from dataclasses import replace
+
+        return replace(
+            self,
+            temperature=self.temperature
+            + (self.temperature_final - self.temperature) * progress,
+            dirichlet_weight=self.dirichlet_weight
+            + (self.dirichlet_weight_final - self.dirichlet_weight) * progress,
+        )
+
 
 @dataclass
 class LoopConfig:

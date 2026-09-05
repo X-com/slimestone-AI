@@ -162,7 +162,12 @@ class Loop:
     # --- one episode ------------------------------------------------------------------
 
     def episode(
-        self, entry: Entry, source: str, round_index: int, sim: SimulatorProcess
+        self,
+        entry: Entry,
+        source: str,
+        round_index: int,
+        sim: SimulatorProcess,
+        search_config=None,
     ) -> dict[str, Any]:
         machine = self.machine_of(entry)
         graph = self.graph_of(entry)
@@ -177,16 +182,17 @@ class Loop:
             self.verdicts[canonical_hash(candidate)] = verdict
             return 1.0 if verdict.get("validCycle") else 0.0
 
+        search_config = search_config or self.config.search
         search = Search(
             machine,
             graph,
             evaluate,
             oracle,
-            config=self.config.search,
+            config=search_config,
             rng=self.rng,
             cache=self.transposition,
         )
-        per_move = max(1, self.config.search.simulations // max(1, self.config.search.k))
+        per_move = max(1, search_config.simulations // max(1, search_config.k))
 
         state = GameState(machine, k=self.config.search.k)
         root = search.expand(state, add_noise=True)
@@ -319,9 +325,13 @@ class Loop:
     def train_round(self, round_index: int, steps: int) -> dict[str, Any]:
         if not self.replay.examples:
             return {"steps": 0}
-        last = {}
-        for _ in range(steps):
-            batch, legal, targets = self._batch(round_index)
+        # Steps alternate, so the term a step did not train is exactly zero. Carrying the last
+        # real value of each keeps a round from reading as "the policy loss collapsed" whenever
+        # the final step happened to be a value step - a reporting artefact, not a fact.
+        last: dict[str, Any] = {"loss_policy": float("nan"), "loss_value": float("nan"),
+                                "n_policy": 0, "n_value": 0}
+        for step in range(steps):
+            batch, legal, targets = self._batch(round_index, step)
             if batch is None:
                 break
             self.net.train()
@@ -331,17 +341,31 @@ class Loop:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.config.train.grad_clip)
             self.optimiser.step()
-            last = parts
+            if parts["n_policy"]:
+                last["loss_policy"] = parts["loss_policy"]
+                last["n_policy"] = parts["n_policy"]
+            if parts["n_value"]:
+                last["loss_value"] = parts["loss_value"]
+                last["n_value"] = parts["n_value"]
         return last
 
-    def _batch(self, round_index: int):
+    def _batch(self, round_index: int, step: int = 0):
         policy_examples = [e for e in self.replay.examples if e.pi is not None]
         value_examples = [e for e in self.replay.examples if e.pi is None]
-        chosen: list[Example] = []
-        chosen += self.replay.sample_from(policy_examples, self.rng, self.config.train.batch_machines)
-        chosen += self.replay.sample_from(
-            value_examples, self.rng, self.config.train.value_states_per_machine
+        # Alternate, for the same reason train.build_step does: mixing both kinds in one batch
+        # means the item budget is shared, and a library machine near the cap on its own then
+        # leaves room for almost nothing. Measured on the first Stage 1 run: 2 policy and 1-3
+        # value examples per step, against Stage 0's much larger ones. The loop trained, but
+        # thinly, and every counter still looked healthy.
+        pool = policy_examples if step % 2 == 0 else value_examples
+        if not pool:
+            pool = value_examples if step % 2 == 0 else policy_examples
+        want = (
+            self.config.train.batch_machines
+            if step % 2 == 0
+            else self.config.train.value_states_per_machine
         )
+        chosen = self.replay.sample_from(pool, self.rng, max(want, 8))
         if not chosen:
             return None, None, None
 
@@ -398,10 +422,14 @@ class Loop:
                 started = time.perf_counter()
                 totals = {source: {"calls": 0, "working": 0, "non_cargo": 0} for source in SOURCES}
                 predictions: list[tuple[float, float]] = []
+                # Exploration decays across the run rather than being a constant.
+                search_config = self.config.search.at_round(round_index, loop.rounds)
                 for source in plan:
                     entry = self.pick_base()
                     try:
-                        result = self.episode(entry, source, round_index, sim)
+                        result = self.episode(
+                            entry, source, round_index, sim, search_config=search_config
+                        )
                     except GraphTooLarge:
                         continue
                     for key in ("calls", "working", "non_cargo"):
@@ -417,6 +445,8 @@ class Loop:
                     per_source=totals,
                     headline=self._headline(totals),
                     library=self.store.variety(),
+                    temperature=round(search_config.temperature, 4),
+                    dirichlet_weight=round(search_config.dirichlet_weight, 4),
                     replay=len(self.replay.examples),
                     value_head=self._value_report(predictions),
                     **training,
