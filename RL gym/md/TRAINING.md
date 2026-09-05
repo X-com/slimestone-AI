@@ -13,7 +13,8 @@ specification; this is the operating manual for what was built from it.
 | `train.py` | losses, the training loop, evaluation against the ladder, checkpoints |
 | `search.py` | PUCT with simulator leaves |
 | `store.py` | machine library and attempt log — Part 6's two destinations |
-| `loop.py` | the outer loop — machine choice, budget split, cargo filter, retraining |
+| `loop.py` | the outer loop — machine choice, budget split, trimming, retraining |
+| `function.py` | **redundant-block detection — what replaced the cargo metric** |
 | `recall.py` | MILESTONE 3 — recall@B against exhaustive k=2 ground truth |
 | `metrics.py` | one JSONL row per evaluation, carrying the whole config |
 | `bench.py` | timing, never fails the build |
@@ -121,13 +122,25 @@ perfectly but predicts 0.02 everywhere passes every AUC check and fails the Stag
 ## Reading a loop run
 
 ```
-round   3    47.2s   non-cargo/1k: model  12.50  control   0.00   library   4   replay   1008
+round 3   33.0s   functional/1k: model 272.73  control 16.67   stripped 13   library 12   replay 250
 ```
 
-**The headline is non-cargo discoveries per 1,000 simulator calls, model versus control.**
-Everything else in the row is diagnostic. At 0.348% non-cargo, a few hundred calls contain about
-one by chance, so a single round is noise — it is logged per round so it can be pooled, not so it
-can be read alone.
+**The headline is functional discoveries per 1,000 simulator calls, model versus control.**
+
+A discovery counts when, after every redundant block has been stripped, what remains is **not the
+machine we started from**. Every block in it serves a function: removing any one would move a
+piston to another tick, reorder two pistons within a tick, or stop the machine working.
+
+This replaced "non-cargo per 1,000", which asked whether the flight changed — a question that
+cannot separate a useless block from one placed for looks, as a floor, or for any other purpose
+in the game. See `rlgym/function.py`.
+
+`stripped` counts redundant blocks removed before admission. If it climbs while functional
+discoveries do not, the loop is proposing waste, and the trimming is the only thing standing
+between the library and a lineage of dead weight.
+
+Everything else in the row is diagnostic, and a single round is noise — it is logged per round so
+it can be pooled, not so it can be read alone.
 
 **Library size is not progress.** `canonical_hash` dedupes on structure, so a machine plus one
 carried block hashes differently and trivial growth registers as discovery. That is exactly how
@@ -160,7 +173,7 @@ records which setting produced which number.
 
 | open problem | knob | what settles it |
 |---|---|---|
-| binary reward is 313:1 cargo | `train.reward_cargo` = 1.0 | non-cargo/1k over rounds, with and without |
+| binary reward is dominated by no-op blocks | `train.reward_cargo` = 1.0 | functional discoveries/1k over rounds, with and without |
 | policy-target ageing | `train.policy_age_decay` = 0.0 | held-out policy loss both ways |
 | root oversampling | `train.root_weight` = 1.0 | held-out loss by state depth |
 | top-M search restriction | `search.search_top_m` = 0 | recall@B at equal budget, both ways |

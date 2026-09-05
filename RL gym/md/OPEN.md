@@ -43,10 +43,25 @@ With "does it still work" as the only objective, a block riding along genuinely 
 is the absence of a usefulness objective, not a model failure** — the model optimises exactly what it
 was asked. The GA experience will repeat on this axis; what changes is speed and waste, not taste.
 
-Cheap partial detector, nearly free given the log comparison already planned: if the modified machine
-has the **same period, the same shift, and every original block still behaves identically at every
-tick**, the new block is pure cargo. Flag it. This does not rank good extensions against each other,
-but it separates "carried along" from "changed what the machine does".
+**SUPERSEDED — see `rlgym/function.py`.** The cargo detector described below was never the right
+question. It asks whether a modification changed what the machine does, and that cannot
+distinguish a useless block from one placed for looks, as a floor, a marker, or for any other
+purpose in the game. Intent is not recoverable from a flight, so the system stops guessing at it.
+
+What replaced it: **assume every block is valid as long as it serves a function, and detect only
+the blocks that serve none.** A block is redundant when it can be removed with the pistons still
+operating identically — same tick, same order within a tick — **and the machine still working**.
+Redundant blocks are stripped before a discovery enters the library, so waste is prevented by
+*removal* rather than by *refusal*, and a genuine discovery carrying a decorative block is kept
+instead of thrown away.
+
+Both halves are required, and they are not equivalent: on `simple_observer_engine`, removing the
+block at (0,0,1) leaves the piston signature byte-identical while `validCycle` flips True to False
+and the period collapses from 10 to 2.
+
+*The original text, kept for the record:* if the modified machine has the same period, the same
+shift, and every original block still behaves identically at every tick, the new block is pure
+cargo. Flag it.
 
 ### Large machines
 

@@ -174,7 +174,7 @@ def build(
 
     # The record lives in the simulator's own coordinates (a fixture at y=0 is logged at y=64),
     # so everything below works in record space and the candidate cells are translated into it.
-    offset = _record_offset(machine, record)
+    offset = record_offset(machine.cells, record)
     policy_cells = [_shift(cell, offset) for cell in machine.cell_list]
     boards = boards_by_tick(record)
 
@@ -254,23 +254,28 @@ def apply_notes(graph: Graph, placements: tuple[Placement, ...]) -> Graph:
     return replace(graph, note_type=note_type, note_facing=note_facing, scalars=scalars)
 
 
-def _record_offset(machine: Machine, record: Record) -> tuple[int, int, int]:
+def record_offset(cells: dict[Cell, int], record: Record) -> tuple[int, int, int]:
     """The translation from candidate space to record space.
 
     Derived from the two block sets rather than assumed: both are the same machine, so the
     difference of their minimum corners is the offset. A machine whose block multiset does not
     match its own record would be a serious bug elsewhere, so it is checked.
+
+    Takes a cell map rather than a Machine so `function.py` can use it on a trimmed candidate
+    that has no Machine of its own. There is deliberately only one copy of this arithmetic: a
+    duplicated coordinate transform that drifts is exactly the failure this project keeps
+    finding, and it is silent every time.
     """
-    mine = sorted(machine.cells.values())
+    mine = sorted(cells.values())
     theirs = sorted(block.raw_state for block in record.initial)
     if mine != theirs:
         raise ValueError(
             "machine and record describe different block multisets - the record does not "
             "belong to this machine"
         )
-    mx = min(c[0] for c in machine.cells)
-    my = min(c[1] for c in machine.cells)
-    mz = min(c[2] for c in machine.cells)
+    mx = min(c[0] for c in cells)
+    my = min(c[1] for c in cells)
+    mz = min(c[2] for c in cells)
     rx = min(b.pos[0] for b in record.initial)
     ry = min(b.pos[1] for b in record.initial)
     rz = min(b.pos[2] for b in record.initial)

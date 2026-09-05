@@ -1,11 +1,13 @@
 """Library and attempt log - md/VERIFICATION.md, for Part 6's two destinations.
 
-The single most important rule in this file is that **cargo never becomes a parent**. It is not
-a performance concern: cargo accumulates monotonically because nothing removes it, so one leak
-compounds into a library where most of every machine is dead weight, and every symptom of that
-(bigger inputs, slower simulation, noisier features) looks like something else.
+**Nothing is refused for what it does to the flight any more.** The cargo test asked whether a
+modification changed the period or shift, which cannot tell a useless block from one placed for
+looks, as a floor, or for any other purpose in the game. Waste is now prevented by *removal*
+rather than *refusal*: `function.trim` strips redundant blocks and the stripped machine is what
+gets admitted, so a genuine discovery carrying a decorative block is kept instead of thrown away.
 
-The second is that library size is not progress. Nothing here asserts that it grows.
+What this file still pins: a machine enters once, a lineage is tracked, every attempt is logged
+including the failures, and **library size is not progress** - nothing here asserts that it grows.
 """
 from __future__ import annotations
 
@@ -30,32 +32,39 @@ def store(tmp_path) -> Store:
     return Store(tmp_path / "library")
 
 
-def test_cargo_is_refused_from_the_library(store):
-    """Part 6's table: generation 10 of a cargo-admitting library carries 20 dead blocks for 10
-    useful ones. The refusal is the only thing preventing it."""
-    store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
-    parent = canonical_hash(candidate(2))
-    assert store.admit(candidate(3), parent, 1, 4, (0, 0, 1), cargo=True) is None
-    assert len(store) == 1
+def test_a_discovery_that_leaves_the_flight_unchanged_is_still_admitted(store):
+    """The behaviour the cargo filter used to prevent, now deliberate.
 
-
-def test_a_non_cargo_discovery_is_admitted_as_a_child(store):
+    Same period and same shift as the parent - the old test called that cargo and refused it.
+    A block placed for looks, or as a floor, produces exactly this signature, and refusing it
+    threw away the whole discovery to avoid one spare block. Redundant blocks are stripped
+    upstream by `function.trim`; the store no longer judges.
+    """
     base = store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
-    entry = store.admit(candidate(3), base.digest, 1, 8, (0, 0, 2), cargo=False)
+    entry = store.admit(candidate(3), base.digest, 1, 4, (0, 0, 1))
+    assert entry is not None
+    assert len(store) == 2
+
+
+def test_a_discovery_is_admitted_as_a_child(store):
+    base = store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
+    entry = store.admit(candidate(3), base.digest, 1, 8, (0, 0, 2))
     assert entry is not None
     assert entry.parent == base.digest
     assert entry.generation == 1
     assert store.entries[base.digest].descendants == 1
 
 
-def test_cargo_may_be_admitted_only_when_explicitly_allowed(store):
-    """The escape hatch exists so the decision can be *measured*, not so it can be forgotten."""
+def test_an_entry_remembers_what_was_stripped_from_it(store):
+    """The replacement for the cargo flag: how much waste was removed before admission, and
+    whether the block the model actually chose survived."""
     base = store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
-    assert store.admit(candidate(3), base.digest, 1, 4, (0, 0, 1), cargo=True) is None
-    assert (
-        store.admit(candidate(3), base.digest, 1, 4, (0, 0, 1), cargo=True, allow_cargo=True)
-        is not None
+    entry = store.admit(
+        candidate(3), base.digest, 1, 8, (0, 0, 2),
+        redundant_removed=2, added_is_load_bearing=False,
     )
+    assert entry.redundant_removed == 2
+    assert entry.added_is_load_bearing is False
 
 
 def test_the_same_machine_is_never_admitted_twice(store):
@@ -67,8 +76,8 @@ def test_the_same_machine_is_never_admitted_twice(store):
     not a translation of this one.
     """
     base = store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
-    first = store.admit(candidate(3), base.digest, 1, 8, (0, 0, 2), cargo=False)
-    again = store.admit(candidate(3, offset=17), base.digest, 1, 8, (0, 0, 2), cargo=False)
+    first = store.admit(candidate(3), base.digest, 1, 8, (0, 0, 2))
+    again = store.admit(candidate(3, offset=17), base.digest, 1, 8, (0, 0, 2))
     assert first is not None and again is None
     assert len(store) == 2
 
@@ -85,7 +94,6 @@ def test_every_attempt_is_logged_including_the_failures(store):
                 source="top",
                 reward=float(index % 2),
                 working=bool(index % 2),
-                cargo=False,
                 period=4,
                 shift=(0, 0, 1),
                 blocks=3,
@@ -99,7 +107,7 @@ def test_every_attempt_is_logged_including_the_failures(store):
 def test_the_log_survives_a_reopen(store, tmp_path):
     """Append-only, so a crashed run leaves valid data rather than a truncated file."""
     store.record(
-        Attempt("d0", "p", 1, "top", 1.0, True, False, 4, (0, 0, 1), 3)
+        Attempt("d0", "p", 1, "top", 1.0, True, 4, (0, 0, 1), 3)
     )
     store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
     store.save()
@@ -114,7 +122,7 @@ def test_variety_reports_concentration_not_just_size(store):
     self-selected training distribution looks like from outside, and size alone hides it."""
     base = store.seed("base", candidate(2), period=4, shift=(0, 0, 1))
     for blocks in (3, 4, 5):
-        store.admit(candidate(blocks), base.digest, 1, 8, (0, 0, 2), cargo=False)
+        store.admit(candidate(blocks), base.digest, 1, 8, (0, 0, 2))
     report = store.variety()
     assert report["size"] == 4
     assert report["roots"] == 1

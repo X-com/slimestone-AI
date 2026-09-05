@@ -134,7 +134,9 @@ class LoopConfig:
     share_sampled: float = 0.35
     share_uninformed: float = 0.05
     train_steps_per_round: int = 50
-    cargo_may_enter_library: bool = False  # Part 6: building on cargo compounds
+    # Redundant blocks are stripped before admission rather than the machine being refused, so
+    # there is no longer an admission filter to switch off. See rlgym/function.py.
+    trim_discoveries: bool = True
     seed: int = 0
 
     def shares(self) -> tuple[float, float, float]:

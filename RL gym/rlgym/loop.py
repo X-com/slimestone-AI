@@ -40,7 +40,16 @@ import torch
 
 from rlgym.config import Config
 from rlgym.dataset import machine_for
-from rlgym.game import Candidate, GameState, Machine, Placement, canonical_hash, decode_action
+from rlgym.function import added_cells, trim
+from rlgym.game import (
+    Candidate,
+    GameState,
+    Machine,
+    Placement,
+    blocks_to_map,
+    canonical_hash,
+    decode_action,
+)
 from rlgym.graph import GraphTooLarge, apply_notes, build
 from rlgym.labeller import corpus_names
 from rlgym.metrics import Metrics
@@ -111,6 +120,7 @@ class Loop:
         self.metrics = Metrics(self.out_dir / "metrics.jsonl", {"config": config.to_json()})
         self.machines: dict[str, Machine] = {}
         self.graphs: dict[str, Any] = {}
+        self.records: dict[str, Any] = {}
         self.verdicts: dict[str, dict] = {}
         self.transposition: dict[str, float] = {}
 
@@ -141,10 +151,15 @@ class Loop:
         return self.machines[entry.digest]
 
     def graph_of(self, entry: Entry):
-        """One build per machine, then every candidate on it is a note patch."""
+        """One build per machine, then every candidate on it is a note patch.
+
+        The record is kept, not discarded: `function.trim` needs the base machine's push groups
+        to work out which groups a modification changed, and it was already paid for here.
+        """
         if entry.digest not in self.graphs:
             machine = self.machine_of(entry)
             record = record_for(machine.to_candidate(cid=0))
+            self.records[entry.digest] = record
             self.graphs[entry.digest] = build(machine, record, tick_cap=self.config.tick_cap)
         return self.graphs[entry.digest]
 
@@ -229,18 +244,44 @@ class Loop:
         """Everything the search paid for, recorded.
 
         A search spends its whole budget and ends on one move; the other outcomes are true
-        labels that cost nothing extra. All working non-cargo ones enter the library - nothing
-        paid for is discarded.
+        labels that cost nothing extra. Every working one enters the library, **stripped of its
+        redundant blocks** - nothing paid for is discarded, and nothing useless is kept.
         """
-        working = non_cargo = 0
+        working = load_bearing = stripped = 0
         machine = self.machine_of(entry)
+        base_record = self.records.get(entry.digest)
         for first_action, candidate, reward in search.attempts:
             digest = canonical_hash(candidate)
             verdict = self.verdicts.get(digest, {})
             period = int(verdict.get("period", 0))
             raw = verdict.get("finalShift") or {"x": 0, "y": 0, "z": 0}
             shift = (raw["x"], raw["y"], raw["z"])
-            cargo = reward > 0 and period == entry.period and shift == tuple(entry.shift)
+            result = None
+            if reward > 0 and base_record is not None:
+                working += 1
+                cells = blocks_to_map(candidate["blocks"])
+                result = trim(
+                    machine, base_record, cells, added_cells(machine.cells, cells)
+                )
+                stripped += result.redundant_removed
+                trimmed = machine.to_candidate(result.cells, cid=0)
+                # A discovery counts when what SURVIVES trimming is not the machine we started
+                # from. If every block the search added was redundant, the trimmed machine is
+                # the parent again and nothing was found - which is the honest answer, and it
+                # is what the old cargo test was groping at without being able to say it.
+                if canonical_hash(trimmed) != entry.digest:
+                    load_bearing += 1
+                self.store.admit(
+                    trimmed,
+                    entry.digest,
+                    round_index,
+                    period,
+                    shift,
+                    redundant_removed=result.redundant_removed,
+                    added_is_load_bearing=result.added_is_load_bearing,
+                )
+            elif reward > 0:
+                working += 1
             self.store.record(
                 Attempt(
                     digest=digest,
@@ -249,25 +290,13 @@ class Loop:
                     source=source,
                     reward=reward,
                     working=reward > 0,
-                    cargo=bool(cargo),
                     period=period,
                     shift=shift,
                     blocks=len(candidate["blocks"]),
+                    redundant_removed=result.redundant_removed if result else 0,
+                    added_is_load_bearing=bool(result.added_is_load_bearing) if result else True,
                 )
             )
-            if reward > 0:
-                working += 1
-                if not cargo:
-                    non_cargo += 1
-                    self.store.admit(
-                        candidate,
-                        entry.digest,
-                        round_index,
-                        period,
-                        shift,
-                        cargo=False,
-                        allow_cargo=self.config.loop.cargo_may_enter_library,
-                    )
             # Every terminal the search simulated is a value example - which is why `v` sees
             # ~100x more data than `p` and will look like it is learning while `p` plateaus.
             # That is the data rates, not a broken policy head.
@@ -285,7 +314,8 @@ class Loop:
             "source": source,
             "calls": search.calls,
             "working": working,
-            "non_cargo": non_cargo,
+            "load_bearing": load_bearing,
+            "redundant_stripped": stripped,
             "value_predictions": search.value_predictions,
         }
 
@@ -420,7 +450,15 @@ class Loop:
 
             for round_index in range(1, loop.rounds + 1):
                 started = time.perf_counter()
-                totals = {source: {"calls": 0, "working": 0, "non_cargo": 0} for source in SOURCES}
+                totals = {
+                    source: {
+                        "calls": 0,
+                        "working": 0,
+                        "load_bearing": 0,
+                        "redundant_stripped": 0,
+                    }
+                    for source in SOURCES
+                }
                 predictions: list[tuple[float, float]] = []
                 # Exploration decays across the run rather than being a constant.
                 search_config = self.config.search.at_round(round_index, loop.rounds)
@@ -432,7 +470,7 @@ class Loop:
                         )
                     except GraphTooLarge:
                         continue
-                    for key in ("calls", "working", "non_cargo"):
+                    for key in ("calls", "working", "load_bearing", "redundant_stripped"):
                         totals[source][key] += result[key]
                     predictions += result["value_predictions"]
 
@@ -470,19 +508,27 @@ class Loop:
 
     @staticmethod
     def _headline(totals) -> dict[str, float]:
-        """**Non-cargo discoveries per 1,000 simulator calls**, model versus the control.
+        """**Functional discoveries per 1,000 simulator calls**, model versus the control.
 
-        Everything else in the row is diagnostic. At 0.348% non-cargo a few hundred calls
-        contain about one by chance, so a single round's number is noise - it is logged per
-        round so it can be pooled, not so it can be read alone.
+        A discovery counts when, after every redundant block has been stripped, what remains is
+        **not the machine we started from**. Every block in it serves a function: removing any
+        one would move a piston to another tick, reorder two pistons within a tick, or stop the
+        machine working.
+
+        This replaced "non-cargo per 1,000", which asked whether the flight changed - a question
+        that cannot separate a useless block from one placed for looks, as a floor, or for any
+        other purpose in the game.
+
+        A single round's number is still noise and is logged per round so it can be pooled.
         """
         out = {}
         for source, counts in totals.items():
             calls = counts["calls"]
-            out[source] = round(1000 * counts["non_cargo"] / calls, 2) if calls else 0.0
+            out[source] = round(1000 * counts["load_bearing"] / calls, 2) if calls else 0.0
         model_calls = totals["top"]["calls"] + totals["sampled"]["calls"]
-        model_hits = totals["top"]["non_cargo"] + totals["sampled"]["non_cargo"]
+        model_hits = totals["top"]["load_bearing"] + totals["sampled"]["load_bearing"]
         out["model"] = round(1000 * model_hits / model_calls, 2) if model_calls else 0.0
+        out["redundant_stripped"] = sum(c["redundant_stripped"] for c in totals.values())
         return out
 
     @staticmethod
@@ -508,7 +554,8 @@ class Loop:
         head = row["headline"]
         print(
             f"round {row['round_index']:>3}  {row['seconds']:>6.1f}s   "
-            f"non-cargo/1k: model {head['model']:>6.2f}  control {head['uninformed']:>6.2f}   "
+            f"functional/1k: model {head['model']:>7.2f}  control {head['uninformed']:>6.2f}   "
+            f"stripped {head['redundant_stripped']:>4}   "
             f"library {row['library']['size']:>4}   replay {row['replay']:>6}"
         )
 

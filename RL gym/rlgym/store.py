@@ -2,21 +2,27 @@
 
 Two destinations, and the difference between them is the whole point:
 
-    attempt log     EVERY simulated candidate, working or not, cargo or not
-    machine library ONLY non-cargo working modifications
+    attempt log     EVERY simulated candidate, working or not
+    machine library every working modification, with its REDUNDANT BLOCKS STRIPPED
 
 **Everything paid for is recorded.** A search spends 200 simulator calls and ends on one move;
 the other 199 outcomes are true labels and cost nothing extra to keep. Training on cargo is
 fine - a block riding along is physics the model should know.
 
-**Cargo must never become a parent.** If it enters the library it becomes a base machine and its
-children inherit it:
+**Nothing is refused for being "cargo" any more.** That test asked whether a modification changed
+the flight, which cannot distinguish a useless block from one placed for looks, as a floor, or for
+any other purpose in the game. Intent is not recoverable from a simulation.
 
-    generation 1     1 useful block,  2 cargo
-    generation 10   10 useful blocks, 20 cargo
+What replaces it is `function.py`: a block is redundant only if it can be removed with the
+**pistons still operating identically and the machine still working**. Redundant blocks are
+stripped before a machine is admitted, so waste cannot accumulate down a lineage:
 
-Three times the cell items to encode, three times the simulation cost, and the model's input
-becomes mostly noise. Cargo accumulates monotonically because nothing removes it.
+    generation 1     1 useful block,  0 redundant
+    generation 10   10 useful blocks, 0 redundant
+
+The old failure - three times the cell items, three times the simulation cost, an input that is
+mostly noise - is prevented by removal rather than by refusal, so a genuine discovery carrying a
+decorative block is kept instead of thrown away.
 
 **Library size is not progress** - `canonical_hash` dedupes on structure, so a machine plus one
 carried block hashes differently and trivial growth registers as discovery. That is exactly how
@@ -46,6 +52,8 @@ class Entry:
     blocks: int
     round_found: int = 0
     descendants: int = 0
+    redundant_removed: int = 0  # blocks stripped before admission
+    added_is_load_bearing: bool = True
 
 
 @dataclass
@@ -58,10 +66,11 @@ class Attempt:
     source: str  # top | sampled | uninformed - which share of the budget paid for it
     reward: float
     working: bool
-    cargo: bool
     period: int
     shift: tuple[int, int, int]
     blocks: int
+    redundant_removed: int = 0
+    added_is_load_bearing: bool = True
 
 
 class Store:
@@ -111,15 +120,14 @@ class Store:
         round_index: int,
         period: int,
         shift: tuple[int, int, int],
-        cargo: bool,
-        allow_cargo: bool = False,
+        redundant_removed: int = 0,
+        added_is_load_bearing: bool = True,
     ) -> Entry | None:
-        """Add a working modification to the library, unless it is cargo.
+        """Add a working modification to the library, already stripped of redundant blocks.
 
-        Returns None when refused, which is the common case and not an error.
+        Returns None only when the machine is already in the library. Nothing is refused for
+        what it does to the flight - see the module docstring.
         """
-        if cargo and not allow_cargo:
-            return None
         digest = canonical_hash(candidate)
         if digest in self.entries:
             return None
@@ -134,6 +142,8 @@ class Store:
             shift=tuple(shift),
             blocks=len(candidate["blocks"]),
             round_found=round_index,
+            redundant_removed=redundant_removed,
+            added_is_load_bearing=added_is_load_bearing,
         )
         self.entries[digest] = entry
         if parent_entry is not None:
