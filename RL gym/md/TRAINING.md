@@ -18,6 +18,46 @@ specification; this is the operating manual for what was built from it.
 | `recall.py` | MILESTONE 3 — recall@B against exhaustive k=2 ground truth |
 | `metrics.py` | one JSONL row per evaluation, carrying the whole config |
 | `bench.py` | timing, never fails the build |
+| `serve.py` | the dashboard, and the one command a launcher needs |
+
+## The shortest way in
+
+**`train.bat`, here in `RL gym`. Double-click it.**
+
+It runs the three stages below in order and **skips any whose output already exists**, so a
+fresh clone does the slow work once and every run after it starts training in seconds. It
+refuses to start, with the fix printed, if Python, numpy/torch, or the C++ simulator is
+missing - each of those failing later looks like a broken model rather than a missing tool.
+
+The last stage is `rlgym.serve`, which is the ordinary loop plus two things:
+
+    a dashboard    http://127.0.0.1:8765/ - every discovered machine as it is admitted,
+                   each downloadable as fixture JSON so it opens in the existing visualiser
+    a heartbeat    a console line every 15 seconds
+
+The heartbeat exists because a round takes minutes and prints only at its end, so the console
+is otherwise silent for long enough to look like a crash - which is exactly when someone kills
+a healthy run. It prints only when the attempt or library count actually moved, so a genuinely
+stuck loop goes quiet and that silence means something.
+
+    loaded data/runs/stage0/best.pt (step 400)
+
+      dashboard   http://127.0.0.1:8765/
+      run         data/runs/live
+      plan        10 rounds x 8 episodes, k=2, 120 simulator calls each
+      stop        Ctrl-C
+
+      ...    8s   attempts     22   library    5   replay     30
+      ...   16s   attempts     36   library    6   replay     50
+    round   1   118.4s   functional/1k: model  181.82  control  16.67 ...
+
+The training thread owns the data and the server only reads it, so the dashboard cannot affect
+a run. Ctrl-C stops training and leaves the page up to browse what was found; every round has
+already saved its library, metrics row and checkpoint, so an interrupted run loses at most the
+round in progress.
+
+**Stdlib only** - `http.server`, no framework. `pyproject.toml` declares no dependencies and
+this does not change that.
 
 ## The three stages
 
@@ -26,6 +66,7 @@ py -m rlgym.labeller --all --out data/labels        # once, ~20 min. The corpus.
 py -m rlgym.baselines --budget 100                  # the ladder rungs 0-3. The bar.
 py -m rlgym.train --config configs/stage0.json      # Stage 0. Supervised, no search.
 py -m rlgym.loop  --config configs/stage1.json --checkpoint data/runs/stage0/best.pt
+py -m rlgym.serve --config configs/stage1.json --checkpoint data/runs/stage0/best.pt
 py -m rlgym.labeller simple_machine2 --k2           # once, ~25 min. MILESTONE 3's denominator.
 py -m rlgym.recall --budget 1000                    # MILESTONE 3. Recall against that.
 py bench.py
