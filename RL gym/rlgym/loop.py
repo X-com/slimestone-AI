@@ -40,7 +40,7 @@ import torch
 
 from rlgym.config import Config
 from rlgym.dataset import machine_for
-from rlgym.function import added_cells, trim
+from rlgym.function import added_cells, graded_reward, trim
 from rlgym.game import (
     Candidate,
     GameState,
@@ -49,6 +49,7 @@ from rlgym.game import (
     blocks_to_map,
     canonical_hash,
     decode_action,
+    is_stop,
 )
 from rlgym.graph import GraphTooLarge, apply_notes, build
 from rlgym.labeller import corpus_names
@@ -61,6 +62,19 @@ from rlgym.store import Attempt, Entry, Store
 from rlgym.train import Targets, load_checkpoint, save_checkpoint, total_loss
 
 SOURCES = ("top", "sampled", "uninformed")
+# Summed per source into the round row. `grading_calls` is deliberately NOT part of `calls`:
+# see the note in `episode`.
+TALLIED = (
+    "calls",
+    "working",
+    "load_bearing",
+    "redundant_stripped",
+    "grading_calls",
+    "graded",
+    "stopped",
+    "depth",
+    "episodes",
+)
 
 
 @dataclass
@@ -122,6 +136,10 @@ class Loop:
         self.graphs: dict[str, Any] = {}
         self.records: dict[str, Any] = {}
         self.verdicts: dict[str, dict] = {}
+        # digest -> Trim, filled by the oracle when functional_reward grades a candidate and
+        # read back by _harvest. Without it a graded run would trim every working candidate
+        # twice, once to price it and once to strip it, at ~6 simulator calls a time.
+        self.trims: dict[str, Any] = {}
         self.transposition: dict[str, float] = {}
 
     # --- machines ---------------------------------------------------------------------
@@ -192,10 +210,34 @@ class Loop:
             else net_evaluator(self.net, graph)
         )
 
+        base_record = self.records.get(entry.digest)
+        weight = self.config.loop.functional_reward
+        # Per episode, not per run. A Trim is only valid against the base it was computed from,
+        # and the same digest can be reached from two different parents on two rounds - so
+        # keeping these would eventually hand _harvest another machine's answer. It also stops
+        # the dict growing a full cell map per working candidate for the life of the loop.
+        self.trims.clear()
+        # Calls spent PRICING candidates rather than finding them. Reported separately, never
+        # folded into search.calls: the headline is discoveries per simulator call, and quietly
+        # charging grading to the search would make a graded run look worse at finding things
+        # when all that changed was what it paid to know.
+        graded = {"calls": 0, "n": 0}
+
         def oracle(candidate: Candidate) -> float:
             verdict = sim.simulate(candidate)
-            self.verdicts[canonical_hash(candidate)] = verdict
-            return 1.0 if verdict.get("validCycle") else 0.0
+            digest = canonical_hash(candidate)
+            self.verdicts[digest] = verdict
+            if not verdict.get("validCycle"):
+                return 0.0
+            if weight <= 0.0 or base_record is None:
+                return 1.0
+            cells = blocks_to_map(candidate["blocks"])
+            added = added_cells(machine.cells, cells)
+            result = trim(machine, base_record, cells, added)
+            self.trims[digest] = result
+            graded["calls"] += result.simulator_calls
+            graded["n"] += 1
+            return graded_reward(result, added, weight)
 
         search_config = search_config or self.config.search
         search = Search(
@@ -209,10 +251,13 @@ class Loop:
         )
         per_move = max(1, search_config.simulations // max(1, search_config.k))
 
-        state = GameState(machine, k=self.config.search.k)
+        state = GameState(
+            machine, k=search_config.k, allow_stop=search_config.allow_stop
+        )
         root = search.expand(state, add_noise=True)
         played: list[Placement] = []
-        for depth in range(self.config.search.k):
+        stopped = False
+        for depth in range(search_config.k):
             result = search.run(root, budget=per_move)
             if result.pi.sum() <= 0:
                 break
@@ -233,12 +278,24 @@ class Loop:
                     is_root=(depth == 0),
                 )
             )
+            # The example is recorded BEFORE the action is applied, so `pi` describes the state
+            # the search ran from - which is what puts trainable mass on the stop logit. Break
+            # after recording, never before, or choosing to stop would teach nothing.
+            if is_stop(action, machine.cell_list):
+                stopped = True
+                break
             played.append(decode_action(action, machine.cell_list))
             child = search.reuse(root, action)
-            state = state.step(played[-1])
+            state = state.advance(action)
             root = child if child is not None else search.expand(state)
 
-        return self._harvest(entry, search, source, round_index, played)
+        outcome = self._harvest(entry, search, source, round_index, played)
+        outcome["grading_calls"] = graded["calls"]
+        outcome["graded"] = graded["n"]
+        outcome["stopped"] = int(stopped)
+        outcome["depth"] = len(played)
+        outcome["episodes"] = 1
+        return outcome
 
     def _harvest(self, entry, search, source, round_index, played) -> dict[str, Any]:
         """Everything the search paid for, recorded.
@@ -256,13 +313,24 @@ class Loop:
             period = int(verdict.get("period", 0))
             raw = verdict.get("finalShift") or {"x": 0, "y": 0, "z": 0}
             shift = (raw["x"], raw["y"], raw["z"])
+            # Whether the machine FLIES, which is not the same as whether its reward is above
+            # zero once `functional_reward` is on: a machine whose every addition was redundant
+            # scores exactly 0.0 at w=1.0. Reading "working" off the reward collapsed that case
+            # with "does not fly" - measured on the first graded run, where 12 of 19 flying
+            # machines were logged as failures and never reached the library. The reward is a
+            # training signal; the verdict is the fact.
+            flies = bool(verdict.get("validCycle"))
             result = None
-            if reward > 0 and base_record is not None:
+            if flies and base_record is not None:
                 working += 1
                 cells = blocks_to_map(candidate["blocks"])
-                result = trim(
-                    machine, base_record, cells, added_cells(machine.cells, cells)
-                )
+                # Already trimmed if functional_reward graded this candidate; trimming again
+                # would pay ~6 simulator calls for an answer we hold.
+                result = self.trims.get(digest)
+                if result is None:
+                    result = trim(
+                        machine, base_record, cells, added_cells(machine.cells, cells)
+                    )
                 stripped += result.redundant_removed
                 trimmed = machine.to_candidate(result.cells, cid=0)
                 # A discovery counts when what SURVIVES trimming is not the machine we started
@@ -280,7 +348,7 @@ class Loop:
                     redundant_removed=result.redundant_removed,
                     added_is_load_bearing=result.added_is_load_bearing,
                 )
-            elif reward > 0:
+            elif flies:
                 working += 1
             self.store.record(
                 Attempt(
@@ -289,7 +357,7 @@ class Loop:
                     round_index=round_index,
                     source=source,
                     reward=reward,
-                    working=reward > 0,
+                    working=flies,
                     period=period,
                     shift=shift,
                     blocks=len(candidate["blocks"]),
@@ -413,7 +481,17 @@ class Loop:
             machine = self.machine_of(entry)
             state = GameState(machine, example.placements, k=self.config.search.k)
             graphs.append(apply_notes(base, example.placements))
-            legal_parts.append(np.asarray(GameState(machine, (), k=1).legal_mask(), dtype=bool))
+            # allow_stop must match what produced `pi`. A target with mass on the stop action
+            # against a mask that forbids it puts probability on a -1e9 logit, which is a huge
+            # finite loss that trains the model away from a move it was never allowed to make.
+            legal_parts.append(
+                np.asarray(
+                    GameState(
+                        machine, (), k=1, allow_stop=self.config.search.allow_stop
+                    ).legal_mask(),
+                    dtype=bool,
+                )
+            )
             policy.append(example.pi)
             values.append(example.z if example.pi is None else math.nan)
             weights.append(
@@ -450,15 +528,7 @@ class Loop:
 
             for round_index in range(1, loop.rounds + 1):
                 started = time.perf_counter()
-                totals = {
-                    source: {
-                        "calls": 0,
-                        "working": 0,
-                        "load_bearing": 0,
-                        "redundant_stripped": 0,
-                    }
-                    for source in SOURCES
-                }
+                totals = {source: dict.fromkeys(TALLIED, 0) for source in SOURCES}
                 predictions: list[tuple[float, float]] = []
                 # Exploration decays across the run rather than being a constant.
                 search_config = self.config.search.at_round(round_index, loop.rounds)
@@ -470,7 +540,7 @@ class Loop:
                         )
                     except GraphTooLarge:
                         continue
-                    for key in ("calls", "working", "load_bearing", "redundant_stripped"):
+                    for key in TALLIED:
                         totals[source][key] += result[key]
                     predictions += result["value_predictions"]
 
@@ -529,6 +599,15 @@ class Loop:
         model_hits = totals["top"]["load_bearing"] + totals["sampled"]["load_bearing"]
         out["model"] = round(1000 * model_hits / model_calls, 2) if model_calls else 0.0
         out["redundant_stripped"] = sum(c["redundant_stripped"] for c in totals.values())
+        out["grading_calls"] = sum(c["grading_calls"] for c in totals.values())
+        # Where the stop action shows up, and the only thing that says whether it learned to
+        # use it or just learned that doing nothing is safe. `mean_depth` near 0 with
+        # `stopped` near `episodes` is the degenerate policy config.py warns about.
+        episodes = sum(c["episodes"] for c in totals.values())
+        out["stopped"] = sum(c["stopped"] for c in totals.values())
+        out["mean_depth"] = (
+            round(sum(c["depth"] for c in totals.values()) / episodes, 2) if episodes else 0.0
+        )
         return out
 
     @staticmethod
@@ -552,11 +631,19 @@ class Loop:
     @staticmethod
     def _print(row) -> None:
         head = row["headline"]
+        # Only printed when the stop action is actually in play, so a default run's line is
+        # unchanged and a probe run does not need the JSONL opened to see the one number it
+        # exists to produce.
+        extra = (
+            f"   stop {head['stopped']:>2}  depth {head['mean_depth']:>4.2f}"
+            if head.get("stopped")
+            else ""
+        )
         print(
             f"round {row['round_index']:>3}  {row['seconds']:>6.1f}s   "
             f"functional/1k: model {head['model']:>7.2f}  control {head['uninformed']:>6.2f}   "
             f"stripped {head['redundant_stripped']:>4}   "
-            f"library {row['library']['size']:>4}   replay {row['replay']:>6}"
+            f"library {row['library']['size']:>4}   replay {row['replay']:>6}{extra}"
         )
 
 

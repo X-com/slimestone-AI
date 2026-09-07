@@ -32,7 +32,7 @@ from typing import Callable
 import numpy as np
 
 from rlgym.config import SearchConfig
-from rlgym.game import Candidate, GameState, Machine, canonical_hash, decode_action
+from rlgym.game import Candidate, GameState, Machine, canonical_hash
 from rlgym.graph import Graph, apply_notes
 
 # state -> (prior over actions, value). Supplied by the caller so the uninformed control can
@@ -203,7 +203,7 @@ class Search:
             generator = np.random.default_rng(self.rng.getrandbits(63))
             keys = generator.random(weights.shape[0]) ** (1.0 / np.maximum(weights, 1e-12))
             action = int(np.argmax(np.where(legal, keys, -np.inf)))
-            state = state.step(decode_action(action, self.machine.cell_list))
+            state = state.advance(action)
         return state
 
     def reward_of(self, state: GameState, first_action: int) -> float:
@@ -233,7 +233,7 @@ class Search:
             if first_action < 0:
                 first_action = action
             path.append((node, action))
-            state = state.step(decode_action(action, self.machine.cell_list))
+            state = state.advance(action)
             child = node.children.get(action)
             if child is None:
                 child = self.expand(state)
@@ -262,7 +262,12 @@ class Search:
     def run(self, root: Node | None = None, budget: int | None = None) -> SearchResult:
         budget = self.config.simulations if budget is None else budget
         if root is None:
-            root = self.expand(GameState(self.machine, k=self.config.k), add_noise=True)
+            root = self.expand(
+                GameState(
+                    self.machine, k=self.config.k, allow_stop=self.config.allow_stop
+                ),
+                add_noise=True,
+            )
         start = self.calls
         # A search on a small machine can exhaust its reachable space and then hit the
         # transposition cache forever, spending no budget and never terminating. Give up after

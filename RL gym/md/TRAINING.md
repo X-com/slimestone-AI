@@ -174,6 +174,8 @@ records which setting produced which number.
 | open problem | knob | what settles it |
 |---|---|---|
 | binary reward is dominated by no-op blocks | `train.reward_cargo` = 1.0 | functional discoveries/1k over rounds, with and without |
+| how long an edit should be | `search.allow_stop` = False, `search.k` | `stopped` and `mean_depth` in the round row |
+| what a working machine is worth | `loop.functional_reward` = 0.0 | functional discoveries/1k at equal budget |
 | policy-target ageing | `train.policy_age_decay` = 0.0 | held-out policy loss both ways |
 | root oversampling | `train.root_weight` = 1.0 | held-out loss by state depth |
 | top-M search restriction | `search.search_top_m` = 0 | recall@B at equal budget, both ways |
@@ -181,8 +183,46 @@ records which setting produced which number.
 | graph cost | `tick_cap` = 32 | `bench.py` |
 | capacity | `net.d_model` / `n_rounds` / `n_heads` | train and held-out reported separately, always |
 
-`configs/cargo_probe.json` is the first of these already written out; run it against
-`configs/stage1.json` and compare the `round` rows.
+`configs/cargo_probe.json` and `configs/stop_probe.json` are the two already written out; run
+either against `configs/stage1.json` and compare the `round` rows.
+
+## The stop action, and why it is off
+
+`k` is an exact edit length, not a ceiling: the stop slot exists in the policy head but
+`legal_mask` masks it. `search.allow_stop` unmasks it, which turns `k` into a ceiling the model
+may end short of - and that is the whole of what "let the model decide how many blocks to place"
+needs, mechanically.
+
+**Mechanically. The reward is the problem.** A candidate's reward is `validCycle`, and an episode
+that stops at depth 0 hands back the base machine, which works. So a perfect 1.0 is available for
+zero risk and *doing nothing is the optimal policy*. Turning `allow_stop` on by itself measures
+that degenerate policy and nothing else.
+
+`loop.functional_reward` is what prices it. At weight `w` a working candidate scores
+
+    (1 - w) + w * (added blocks that survived trimming / added blocks)
+
+so a machine whose every addition was redundant - including the one that added nothing - scores
+`1 - w`. Redundancy is the one objective usefulness signal that exists here
+(`rlgym/function.py`), and this is where it stops being only a filter.
+
+Grading is not free: it needs `trim`, about 6 simulator calls, on each **working** candidate.
+Those calls are reported as `grading_calls` and are deliberately **not** added to `calls`, or a
+graded run would look worse at finding things when all that changed was what it paid to know.
+
+Two numbers say what happened, both in the round row:
+
+| | reading |
+|---|---|
+| `stopped` near `episodes`, `mean_depth` near 0 | the degenerate policy - it learned that doing nothing is safe |
+| `stopped` low, `mean_depth` near `k` | the ceiling is binding; raise `k` or the stop action is not being learned |
+| `stopped` moderate, `mean_depth` in between | it is choosing, which is the result worth having |
+
+**The expected outcome is the first one**, and running it is how that stops being a prediction.
+The deeper obstacle is `md/OPEN.md`'s "Ranking which working changes are useful": surviving
+trimming says a block *does something*, not that what it does is *wanted*. Coverage and credit
+assignment also degrade with depth - one binary signal for eight decisions - which is the
+composition problem OPEN.md leaves open.
 
 A config refuses an unknown key rather than ignoring it. A typo would otherwise be a silent no-op
 that looks exactly like the knob having no effect — the one conclusion this whole measurement

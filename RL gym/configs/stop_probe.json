@@ -1,0 +1,15 @@
+{
+ "_": "The stop-action probe. k becomes a CEILING of 8 rather than an exact edit length, and a working machine is priced by how much of it survives trimming. Run against stage1.json and compare the `stopped` and `mean_depth` fields of the round rows. Expected failure, and the reason to measure rather than argue: even priced, the model may still learn to stop at depth 0, because a base machine that already works is a safe 0.0-risk outcome. See md/OPEN.md.",
+ "search": {
+  "k": 8,
+  "allow_stop": true,
+  "simulations": 240,
+  "c_puct": 1.25
+ },
+ "loop": {
+  "functional_reward": 1.0,
+  "rounds": 10,
+  "episodes_per_round": 8,
+  "train_steps_per_round": 20
+ }
+}

@@ -283,6 +283,33 @@ def trim(
     return Trim(kept, sorted(removed), not (added & removed), len(signature), calls)
 
 
+def surviving_fraction(result: Trim, added: set[Cell]) -> float:
+    """What fraction of the added blocks were still load-bearing after trimming.
+
+    0.0 when nothing was added at all - which is exactly the machine that stopped at depth 0,
+    and the reason this is a usable price for stopping early rather than only a diagnostic.
+    """
+    if not added:
+        return 0.0
+    survived = len(added - set(result.removed))
+    return survived / len(added)
+
+
+def graded_reward(result: Trim, added: set[Cell], weight: float) -> float:
+    """A working candidate's reward, priced by how much of it does anything.
+
+        weight = 0.0   1.0 for anything that works - today's binary reward, unchanged
+        weight = w     (1 - w) + w * surviving_fraction
+
+    Only the WORKING branch calls this. A machine that does not fly is 0.0 whatever it is made
+    of, and no amount of usefulness weighting should change that.
+    """
+    if weight <= 0.0:
+        return 1.0
+    weight = min(1.0, weight)
+    return (1.0 - weight) + weight * surviving_fraction(result, added)
+
+
 def added_cells(base: dict[Cell, int], candidate: dict[Cell, int]) -> set[Cell]:
     """Cells the modification wrote: anything present in the candidate that the base did not
     have, or had with a different state."""

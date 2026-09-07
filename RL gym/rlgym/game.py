@@ -121,13 +121,17 @@ def legal_mask(
     cells: dict[Cell, int],
     cell_list: list[Cell],
     written: frozenset[Cell] = frozenset(),
+    allow_stop: bool = False,
 ) -> list[bool]:
     """One flag per action, in action order: cell_list x PALETTE_SLOTS, then the stop slot.
 
-    Masked: reserved palette slots; stop; no-ops; and any action touching a cell already
-    written this episode - BOTH cells for an extended piston. That last rule is what makes the
-    set of placements order-independent, which kills point 23's factorial duplicate explosion
+    Masked: reserved palette slots; no-ops; and any action touching a cell already written this
+    episode - BOTH cells for an extended piston. That last rule is what makes the set of
+    placements order-independent, which kills point 23's factorial duplicate explosion
     structurally instead of catching it with a hash afterwards.
+
+    Stop is masked unless `allow_stop`, in which case `k` becomes a ceiling the episode may end
+    short of rather than an exact edit length.
     """
     mask = [False] * (len(cell_list) * PALETTE_SLOTS + 1)
     for cell_index, cell in enumerate(cell_list):
@@ -141,13 +145,23 @@ def legal_mask(
             if is_no_op(cells, placement):
                 continue
             mask[base + slot] = True
-    # mask[-1] is stop: reserved and always masked while k is a fixed constant. The slot exists
-    # so that unmasking it later is not a change to the policy head's shape.
+    # The slot has always existed so that unmasking it is not a change to the policy head's
+    # shape - which is what makes this one flag rather than a retrain.
+    mask[-1] = bool(allow_stop)
     return mask
 
 
 def action_index(cell_index: int, slot: int) -> int:
     return cell_index * PALETTE_SLOTS + slot
+
+
+def stop_index(cell_list: list[Cell]) -> int:
+    """The stop action's index: always last, so it does not move when the machine changes."""
+    return len(cell_list) * PALETTE_SLOTS
+
+
+def is_stop(index: int, cell_list: list[Cell]) -> bool:
+    return index == stop_index(cell_list)
 
 
 def action_count(cell_list: list[Cell]) -> int:
@@ -280,10 +294,18 @@ class GameState:
     machine: Machine
     placements: tuple[Placement, ...] = ()
     k: int = DEFAULT_K
+    # Both default to today's behaviour: stop is unreachable and `k` is an exact edit length.
+    allow_stop: bool = False
+    stopped: bool = False
 
     @property
     def is_terminal(self) -> bool:
-        return len(self.placements) >= self.k
+        """Terminal when the model said so, or when it ran out of moves.
+
+        `k` is a ceiling either way. With `allow_stop` off, `stopped` is never set and this is
+        the original `len(placements) >= k` exactly.
+        """
+        return self.stopped or len(self.placements) >= self.k
 
     @property
     def written(self) -> frozenset[Cell]:
@@ -301,13 +323,45 @@ class GameState:
     def legal_mask(self) -> list[bool]:
         if self.is_terminal:
             return [False] * self.machine.action_count
-        return legal_mask(self.current_cells(), self.machine.cell_list, self.written)
+        return legal_mask(
+            self.current_cells(),
+            self.machine.cell_list,
+            self.written,
+            allow_stop=self.allow_stop,
+        )
 
     def step(self, placement: Placement) -> "GameState":
         """Deterministic, free, no simulator call - the whole point of the note mechanism."""
         if self.is_terminal:
             raise ValueError("cannot place on a terminal state")
-        return GameState(self.machine, self.placements + (placement,), self.k)
+        return GameState(
+            self.machine, self.placements + (placement,), self.k, self.allow_stop
+        )
+
+    def stop(self) -> "GameState":
+        """End the episode here. The machine is whatever has been placed so far.
+
+        Legal at depth 0, deliberately: stopping immediately returns the base machine, which
+        works, so under a binary reward it scores a perfect 1.0 for no risk. Banning it here
+        would hide that with a rule instead of pricing it, and pricing it is the whole point of
+        `loop.functional_reward`. If the loop degenerates to stopping at depth 0, that is the
+        measurement working, not a bug to be masked.
+        """
+        if self.is_terminal:
+            raise ValueError("cannot stop on a terminal state")
+        return GameState(
+            self.machine, self.placements, self.k, self.allow_stop, stopped=True
+        )
+
+    def advance(self, action: int) -> "GameState":
+        """One action, whether it is a placement or stop.
+
+        Callers work in action indices, and only this method knows that one of them is not a
+        placement - so `decode_action` never has to be guarded at four separate call sites.
+        """
+        if is_stop(action, self.machine.cell_list):
+            return self.stop()
+        return self.step(decode_action(action, self.machine.cell_list))
 
     def to_candidate(self, cid: int = 0) -> Candidate:
         return self.machine.to_candidate(self.current_cells(), cid)

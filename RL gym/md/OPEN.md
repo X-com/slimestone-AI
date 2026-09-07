@@ -81,6 +81,20 @@ not (`1797`: period 1797 over 1797 ticks; `flying_dog`: 468 over 473).
 The architecture has no ceiling — "place one block or stop" scales to any length, and beam search
 cost grows only linearly with depth.
 
+**The stop action is now reachable** behind `search.allow_stop` (off by default), which makes `k`
+a ceiling rather than an exact edit length. What that exposed is that the mechanism was never the
+obstacle:
+
+> A candidate's reward is `validCycle`. An episode that stops at depth 0 returns the base
+> machine, which works. So a perfect 1.0 is available for zero risk, and **doing nothing is the
+> optimal policy** under a binary reward.
+
+`loop.functional_reward` prices that, using the only objective usefulness signal that exists —
+whether a block survives redundancy trimming. It is a floor, not a solution: surviving trimming
+says a block *does something*, not that what it does is *wanted*, which is this document's first
+open problem restated. `configs/stop_probe.json` runs it; the `stopped` and `mean_depth` fields
+of the round row are the measurement.
+
 What breaks is **coverage**. A fixed-width beam explores a decent slice at depth 5 and vanishingly
 little at depth 50, while the space grows astronomically. Credit assignment degrades too (one reward
 signal for 50 decisions), and a predictor trained on small edits drifts out of distribution.

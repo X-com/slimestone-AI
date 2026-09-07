@@ -10,6 +10,8 @@ off again is a config edit, and both are recorded in the metrics row.
     policy-target ageing             policy_age_decay      0.0   (= flat, no ageing)
     root oversampling                root_weight           1.0   (= no down-weight)
     top-M search restriction         search_top_m          0     (= unrestricted)
+    when to stop editing             allow_stop            False (= k is an exact length)
+    what a working machine is worth  functional_reward     0.0   (= 1.0 for anything working)
     graph build cost                 tick_cap              32
     d_model / T / heads              d_model, n_rounds...  128 / 8 / 4
 
@@ -93,6 +95,14 @@ class SearchConfig:
     k: int = 2
     reuse_subtree: bool = True
 
+    # Unmask the stop action, so `k` becomes a CEILING the model may stop short of rather than an
+    # exact edit length. Off by default, and the default is not timidity: under a binary
+    # does-it-work reward, stopping at depth 0 returns the base machine, which works, so a
+    # perfect 1.0 is available for zero risk and doing nothing is the optimal policy. Turning
+    # this on without `loop.functional_reward` above 0 measures exactly that degenerate policy.
+    # See md/OPEN.md, "Ranking which working changes are useful".
+    allow_stop: bool = False
+
     # Both exploration knobs start high and decay - README.md: "Both start high and decay.
     # Nothing switches over; it is one loop throughout." They were fixed constants until this
     # was added, so the loop explored exactly as hard on its last round as on its first.
@@ -137,6 +147,22 @@ class LoopConfig:
     # Redundant blocks are stripped before admission rather than the machine being refused, so
     # there is no longer an admission filter to switch off. See rlgym/function.py.
     trim_discoveries: bool = True
+
+    # Reward shaping, and the only thing that makes stopping early cost anything.
+    #
+    #     0.0   today: every working candidate scores 1.0, whatever it is made of
+    #     w     a working candidate scores (1 - w) + w * (added blocks that SURVIVED trimming
+    #           / added blocks), so a machine whose every addition was redundant - including
+    #           the machine that stopped at depth 0 and added nothing - scores (1 - w)
+    #
+    # At w = 1.0 the reward IS the surviving fraction. Redundancy is the one objective
+    # usefulness signal that exists (rlgym/function.py); this is where it becomes a reward
+    # rather than only a filter.
+    #
+    # It is not free: grading a candidate needs `trim`, which is ~6 simulator calls. Only
+    # WORKING candidates are graded and the working rate is a few percent, so the overhead is
+    # small - but it is real, it is counted, and `grading_calls` reports it in the round row.
+    functional_reward: float = 0.0
     seed: int = 0
 
     def shares(self) -> tuple[float, float, float]:
