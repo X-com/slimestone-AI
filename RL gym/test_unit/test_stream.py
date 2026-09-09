@@ -206,3 +206,113 @@ def test_a_port_already_in_use_is_reported_not_swallowed(hub):
 def test_publish_returns_what_it_sent(hub):
     assert hub.publish([]) == 0
     assert hub.publish([(candidate(), {}), (candidate(), {})]) == 2
+
+
+# --- requests from the viewer ------------------------------------------------------------
+#
+# The Simulate button asks for one machine's animation. A stub stands in for the real
+# `rlgym.animation.animate` here: what these guard is the request path - routing, lookup and
+# failure handling - not the projection, which test_animation.py covers against the simulator.
+
+
+@pytest.fixture
+def answering_hub():
+    """A hub that answers animation requests by echoing back what it was asked to animate."""
+    seen = []
+
+    def fake_animate(candidate):
+        seen.append(candidate)
+        return {"blocks": candidate["blocks"], "events": [], "terminationTick": 7}
+
+    hub = StreamHub(host="127.0.0.1", port=0, animate=fake_animate)
+    assert hub.start(), f"hub failed to bind: {hub.error}"
+    hub.port = hub._server.sockets[0].getsockname()[1]
+    hub.seen = seen
+    yield hub
+    hub.stop()
+
+
+async def _ask(url: str, request: dict, skip: int = 0, timeout: float = 5.0):
+    async with websockets.connect(url) as ws:
+        for _ in range(skip):  # the backfill frames a fresh connection always gets first
+            await asyncio.wait_for(ws.recv(), timeout)
+        await ws.send(json.dumps(request))
+        return await asyncio.wait_for(ws.recv(), timeout)
+
+
+def ask(hub: StreamHub, request: dict, skip: int = 0):
+    return asyncio.run(_ask(hub.url, request, skip))
+
+
+def test_a_viewer_can_ask_for_one_machine_s_animation(answering_hub):
+    """The machine is recovered from the backlog - the bytes already sent ARE the candidate, so
+    nothing extra is retained to make this answerable."""
+    answering_hub.publish([(candidate(blocks=2), {"name": "m"})])
+    reply = json.loads(ask(answering_hub, {"want": "animation", "id": 0}, skip=2))
+
+    assert reply["id"] == 0
+    assert reply["animation"]["terminationTick"] == 7
+    assert len(reply["animation"]["blocks"]) == 2
+    assert answering_hub.seen[0]["id"] == 0, "the hub's own stream id, which is what was published"
+
+
+def test_an_answer_carries_no_geometry(answering_hub):
+    """A reply is one TEXT frame. Pairing it with an empty binary frame - the shape a publish
+    uses - would make the client rebuild its scene from zero machines."""
+    answering_hub.publish([(candidate(), {})])
+    reply = ask(answering_hub, {"want": "animation", "id": 0}, skip=2)
+    assert isinstance(reply, str)
+
+
+def test_an_unknown_id_is_answered_not_ignored(answering_hub):
+    """Silence is indistinguishable from a hung simulator, and the button would spin forever."""
+    answering_hub.publish([(candidate(), {})])
+    reply = json.loads(ask(answering_hub, {"want": "animation", "id": 999}, skip=2))
+    assert reply["animation"] is None
+    assert "999" in reply["error"]
+
+
+def test_a_hub_with_no_animator_says_so(hub):
+    """`--no-stream` aside, a hub can legitimately be built without a simulator. The viewer has
+    to hear that rather than wait."""
+    hub.publish([(candidate(), {})])
+    reply = json.loads(ask(hub, {"want": "animation", "id": 0}, skip=2))
+    assert reply["animation"] is None and reply["error"]
+
+
+def test_a_failing_animation_is_reported_as_a_message(hub_that_fails):
+    """A simulator that refuses one machine must not take the connection - or the run - with it."""
+    hub_that_fails.publish([(candidate(), {})])
+    reply = json.loads(ask(hub_that_fails, {"want": "animation", "id": 0}, skip=2))
+    assert reply["animation"] is None
+    assert "no simulator here" in reply["error"]
+
+
+@pytest.fixture
+def hub_that_fails():
+    def boom(candidate):
+        raise RuntimeError("no simulator here")
+
+    hub = StreamHub(host="127.0.0.1", port=0, animate=boom)
+    assert hub.start(), f"hub failed to bind: {hub.error}"
+    hub.port = hub._server.sockets[0].getsockname()[1]
+    yield hub
+    hub.stop()
+
+
+def test_an_unrecognised_request_is_ignored_without_dropping_the_client(answering_hub):
+    """The page and this file are versioned separately. A newer viewer asking for something this
+    run cannot do should get a button that does nothing, not a closed socket - so the connection
+    stays live and the next publish still arrives."""
+
+    async def scenario():
+        async with websockets.connect(answering_hub.url) as ws:
+            await ws.send("this is not json")
+            await ws.send(json.dumps({"want": "something-else", "id": 0}))
+            answering_hub.publish([(candidate(blocks=5), {})])
+            binary = await asyncio.wait_for(ws.recv(), 5.0)
+            await asyncio.wait_for(ws.recv(), 5.0)
+            return binary
+
+    binary = asyncio.run(scenario())
+    assert HEADER.unpack_from(binary, 0)[4] == 5

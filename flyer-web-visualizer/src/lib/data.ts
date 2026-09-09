@@ -142,6 +142,50 @@ export interface RunStats {
   attempts: number
 }
 
+// One machine's animation, built by rlgym/animation.py from the simulator's own event record and
+// asked for per machine over the same socket ({"want":"animation","id":N}). Same shape
+// parseGeneratorRecords produces, because animatedScene.ts plays exactly one thing.
+export interface AnimationRecord {
+  trigger: Vec3
+  blocks: Block[]
+  moves: BlockMove[]
+  extensions: BlockExtension[]
+  powered: BlockPowered[]
+  events: MachineEvent[]
+  terminationTick: number
+}
+
+// The reply. `animation: null` with an `error` is a real answer, not a dropped request - silence
+// would be indistinguishable from a hung simulator and the button would spin forever.
+export interface AnimationFrame {
+  animation: AnimationRecord | null
+  id: number
+  error?: string
+}
+
+// Build the Machine the player animates from the record ALONE. The simulator constructs a
+// machine at its own base height, so the animation's coordinates legitimately differ from the
+// compact record's, and its block order is the simulator's, not the candidate's - blockIndex in
+// moves/extensions refers to this array. Mixing the two frames would animate the right motions
+// on the wrong blocks.
+export function machineFromAnimation(record: AnimationRecord, label: string): Machine {
+  return {
+    hash: `anim:${label}`,
+    label,
+    generation: 0,
+    origin: 'training',
+    block_count: record.blocks.length,
+    candidate: { id: 0, trigger: record.trigger, blocks: record.blocks },
+    result: null,
+    found_at: '',
+    moves: record.moves,
+    extensions: record.extensions,
+    powered: record.powered,
+    events: record.events,
+    terminationTick: record.terminationTick,
+  }
+}
+
 export interface TrainingFrame {
   machines: Record<string, Training>
   run: Partial<RunStats>

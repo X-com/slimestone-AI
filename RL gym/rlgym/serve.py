@@ -30,6 +30,7 @@ import threading
 import time
 from pathlib import Path
 
+from rlgym.animation import animate
 from rlgym.config import Config
 from rlgym.loop import Loop
 from rlgym.stream import DEFAULT_BACKLOG, DEFAULT_PORT, StreamHub
@@ -93,7 +94,12 @@ def main() -> None:
 
     hub = None
     if not args.no_stream:
-        hub = StreamHub(host=args.host, port=args.port, backlog=args.backlog)
+        # `animate` is what makes the viewer's Simulate button work: it re-simulates one
+        # published machine with logging on and hands back the per-tick record. Nothing is
+        # computed until somebody asks, so a run nobody watches costs exactly what it did before.
+        hub = StreamHub(
+            host=args.host, port=args.port, backlog=args.backlog, animate=animate
+        )
         if hub.start():
             loop.hub = hub
         else:
@@ -109,6 +115,7 @@ def main() -> None:
     if hub is not None:
         print(f"  stream      {hub.url}")
         print("  viewer      the Live Training page connects to this on its own")
+        print("  simulate    click a machine, then Simulate, to watch it run")
     print(
         f"  plan        {config.loop.rounds} rounds x {config.loop.episodes_per_round} "
         f"episodes, k={config.search.k}, {config.search.simulations} simulator calls each"

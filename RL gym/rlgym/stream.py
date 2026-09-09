@@ -16,6 +16,12 @@ for binary and a string for text):
     binary   concatenated compact records - the machines themselves
     text     one JSON object, {"machines": {<candidate id>: {...}}, "run": {...}}
 
+and one request kind travelling the other way, `{"want": "animation", "id": N}`, answered with
+`{"animation": {...}, "id": N}` to that viewer alone. Animations are built **on demand** rather
+than attached to every discovery: a machine is fully described by its blocks, so the record is
+reproducible from what the viewer already has, and the training loop pays nothing for animations
+nobody asks to watch.
+
 The second exists because the compact format carries geometry and nothing else, so period,
 shift, generation, round found and the redundant-block count have nowhere else to travel. The
 join key is the compact header's `id`, which this file assigns from a monotonic counter - the
@@ -38,12 +44,13 @@ becomes a *client*, where every frame must be masked.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 from collections import deque
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from rlgym.game import Candidate, encode_candidate
+from rlgym.game import Candidate, decode_candidate, encode_candidate
 
 DEFAULT_PORT = 8765
 # Records kept for replay to a late or reconnecting client. Matched to the viewer's own history
@@ -64,9 +71,13 @@ class StreamHub:
         host: str = "localhost",
         port: int = DEFAULT_PORT,
         backlog: int = DEFAULT_BACKLOG,
+        animate: Callable[[Candidate], dict] | None = None,
     ) -> None:
         self.host = host
         self.port = port
+        # Candidate -> the JSON animatedScene.ts plays (rlgym.animation.animate). Optional so a
+        # test, or a run that only wants the stream, needs no simulator.
+        self.animate = animate
         # (record bytes, metadata dict) pairs, newest last. One deque rather than two, so the
         # two halves cannot drift out of step as it evicts.
         self._backlog: deque[tuple[bytes, dict]] = deque(maxlen=backlog)
@@ -169,6 +180,10 @@ class StreamHub:
             self._clients.add(queue)
             history = list(self._backlog)
             run = dict(self._run)
+        # The send side parks on `queue.get()` forever, so listening needs its own task. Replies
+        # go back onto this client's own queue: an animation was asked for by one viewer and is
+        # of no interest to the others.
+        reader = asyncio.create_task(self._read(websocket, queue))
         try:
             if history:
                 await websocket.send(b"".join(record for record, _ in history))
@@ -186,13 +201,64 @@ class StreamHub:
                 if item is None:
                     break  # shutdown sentinel - see _shutdown
                 binary, text = item
-                await websocket.send(binary)
+                # A reply carries no geometry; sending an empty binary frame would make the
+                # client rebuild its scene from zero machines.
+                if binary is not None:
+                    await websocket.send(binary)
                 await websocket.send(text)
         except Exception:  # noqa: BLE001 - a client vanishing is normal, never fatal here
             pass
         finally:
+            reader.cancel()
             with self._lock:
                 self._clients.discard(queue)
+
+    async def _read(self, websocket, queue: asyncio.Queue) -> None:
+        try:
+            async for message in websocket:
+                reply = await self._answer(message)
+                if reply is not None:
+                    queue.put_nowait((None, reply))
+        except Exception:  # noqa: BLE001 - same as the send side: a client leaving is not news
+            pass
+
+    async def _answer(self, message: Any) -> str | None:
+        """One request from one viewer. Returns the JSON to send back, or None to ignore it.
+
+        Unknown requests are ignored rather than refused: the viewer and this file are versioned
+        separately, and a newer page asking for something this run cannot do should degrade to a
+        button that does nothing, not a dropped connection.
+        """
+        if not isinstance(message, str):
+            return None
+        try:
+            request = json.loads(message)
+        except ValueError:
+            return None
+        if not isinstance(request, dict) or request.get("want") != "animation":
+            return None
+        cid = request.get("id")
+        if self.animate is None:
+            return json.dumps({"animation": None, "id": cid, "error": "this run has no simulator"})
+        candidate = self._candidate(cid)
+        if candidate is None:
+            return json.dumps({"animation": None, "id": cid, "error": f"no machine with id {cid}"})
+        try:
+            # In a thread: this spawns the simulator and takes long enough that doing it inline
+            # would stall every other viewer's frames behind one person clicking a button.
+            record = await asyncio.get_running_loop().run_in_executor(
+                None, self.animate, candidate
+            )
+        except Exception as exc:  # noqa: BLE001 - reported to the viewer, never fatal here
+            return json.dumps({"animation": None, "id": cid, "error": str(exc)})
+        return json.dumps({"animation": record, "id": cid})
+
+    def _candidate(self, cid: Any) -> Candidate | None:
+        """Recover a published machine from the backlog. The bytes already on the wire are the
+        candidate, so nothing extra has to be retained to make this answerable."""
+        with self._lock:
+            record = next((r for r, m in self._backlog if m.get("id") == cid), None)
+        return None if record is None else decode_candidate(io.BytesIO(record))
 
     # --- publishing -------------------------------------------------------------------
 

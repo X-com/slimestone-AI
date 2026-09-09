@@ -2,13 +2,16 @@
   import { onMount } from 'svelte'
   import {
     applyTraining,
+    machineFromAnimation,
     parseCompactData,
+    type AnimationFrame,
     type Machine,
     type RunStats,
     type Training,
     type TrainingFrame,
   } from './lib/data'
   import { createScene, type SceneHandle } from './lib/scene'
+  import { createAnimatedScene, type AnimatedSceneHandle } from './lib/animatedScene'
   import MachineDetailPanel from './lib/MachineDetailPanel.svelte'
 
   const PAGE = 25
@@ -42,6 +45,68 @@
   // sends, and only ordered per-connection). Anything unmatched is held here and re-applied on
   // the next batch rather than dropped, so a race shows up as a delay, never as lost data.
   let orphanMeta: Record<string, Training> = {}
+
+  // --- the player -------------------------------------------------------------------------
+  // The still-life view answers "what was found"; this answers "does it actually fly". The
+  // motion is not simulated in the browser: the run re-simulates the machine with logging on
+  // and sends back its real per-tick event record (rlgym/animation.py), which animatedScene.ts
+  // already knows how to play. Asked for one machine at a time, so a run nobody watches pays
+  // nothing.
+  let animating = $state<Machine | null>(null)
+  let awaitingId = $state<number | null>(null) // the candidate id we asked about, if any
+  let animationError = $state('')
+  let playerContainer = $state<HTMLDivElement>()
+  let playerHandle: AnimatedSceneHandle | null = null
+  let playing = $state(false)
+  let speed = $state(180)
+
+  function requestAnimation(m: Machine) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      animationError = 'not connected to a training run'
+      return
+    }
+    animationError = ''
+    awaitingId = m.candidate.id
+    ws.send(JSON.stringify({ want: 'animation', id: m.candidate.id }))
+  }
+
+  function onAnimation(frame: AnimationFrame) {
+    // Ignore an answer to a request we have moved on from - clicking two machines quickly would
+    // otherwise open whichever simulation happened to finish last.
+    if (frame.id !== awaitingId) return
+    awaitingId = null
+    if (!frame.animation) {
+      animationError = frame.error ?? 'the run could not simulate that machine'
+      return
+    }
+    closePlayer()
+    animating = machineFromAnimation(frame.animation, selected?.label ?? `#${frame.id}`)
+  }
+
+  function closePlayer() {
+    playerHandle?.dispose()
+    playerHandle = null
+    animating = null
+    playing = false
+  }
+
+  // The scene is imperative three.js, so it is built after the container exists and torn down
+  // by closePlayer - not by an effect cleanup, which would also fire on every speed change.
+  $effect(() => {
+    if (!animating || !playerContainer) return
+    playerHandle ??= createAnimatedScene(playerContainer)
+    playerHandle.loadMachine(animating)
+    playerHandle.setSpeed(speed)
+    playerHandle.play()
+    playing = true
+  })
+
+  function togglePlay() {
+    if (!playerHandle) return
+    if (playerHandle.isPlaying()) playerHandle.pause()
+    else playerHandle.play()
+    playing = playerHandle.isPlaying()
+  }
 
   let rootEl: HTMLDivElement
   let isFullscreen = $state(false)
@@ -199,11 +264,17 @@
   // The second frame kind: training metadata and run stats, as JSON text. Matched onto machines
   // by the candidate id the hub stamped into each binary record.
   function onMeta(text: string) {
-    let frame: TrainingFrame
+    let frame: TrainingFrame & Partial<AnimationFrame>
     try {
-      frame = JSON.parse(text) as TrainingFrame
+      frame = JSON.parse(text) as TrainingFrame & Partial<AnimationFrame>
     } catch (e) {
       console.warn('dropped malformed metadata frame:', e)
+      return
+    }
+    // Two text frames share this channel. An animation reply carries the key even when the
+    // answer is a failure, so `in` is the discriminator rather than truthiness.
+    if ('animation' in frame) {
+      onAnimation(frame as AnimationFrame)
       return
     }
     if (frame.run) run = frame.run
@@ -558,5 +629,60 @@
     </div>
   </div>
 
-  <MachineDetailPanel machine={selected} onClose={() => onSelect(null)} />
+  <MachineDetailPanel
+    machine={selected}
+    onClose={() => onSelect(null)}
+    onSimulate={requestAnimation}
+    simulating={awaitingId !== null}
+    error={animationError}
+  />
+
+  <!-- The player. An overlay rather than a third viewport: it is one machine at a time, asked
+       for deliberately, and it should not permanently cost the grid any room. -->
+  {#if animating}
+    <div class="absolute inset-0 z-20 flex flex-col bg-slate-950/95">
+      <div
+        class="flex shrink-0 items-center gap-3 border-b border-slate-800 px-4 py-2 text-xs text-slate-300"
+      >
+        <span class="font-semibold text-slate-100">{animating.label}</span>
+        <span class="text-slate-500">{animating.terminationTick ?? 0} ticks</span>
+        <button
+          class="rounded bg-cyan-400 px-3 py-1 font-medium text-slate-900 hover:bg-cyan-300"
+          onclick={togglePlay}>{playing ? '❚❚ Pause' : '▶ Play'}</button
+        >
+        <button
+          class="rounded bg-slate-800 px-2 py-1 hover:bg-slate-700"
+          onclick={() => {
+            playerHandle?.stepTick(-1)
+            playing = false
+          }}>◀ tick</button
+        >
+        <button
+          class="rounded bg-slate-800 px-2 py-1 hover:bg-slate-700"
+          onclick={() => {
+            playerHandle?.stepTick(1)
+            playing = false
+          }}>tick ▶</button
+        >
+        <label class="flex items-center gap-1 text-slate-400">
+          speed
+          <input
+            type="range"
+            min="40"
+            max="600"
+            step="20"
+            bind:value={speed}
+            oninput={() => playerHandle?.setSpeed(speed)}
+            class="w-28"
+          />
+          <span class="w-12 font-mono">{speed}ms</span>
+        </label>
+        <button
+          class="ml-auto rounded px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+          onclick={closePlayer}>✕ Close</button
+        >
+      </div>
+      <div bind:this={playerContainer} class="relative min-h-0 flex-1"></div>
+    </div>
+  {/if}
 </div>

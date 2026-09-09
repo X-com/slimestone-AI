@@ -1,7 +1,21 @@
 <script lang="ts">
   import type { Machine } from './data'
 
-  let { machine, onClose }: { machine: Machine | null; onClose: () => void } = $props()
+  let {
+    machine,
+    onClose,
+    onSimulate,
+    simulating = false,
+    error = '',
+  }: {
+    machine: Machine | null
+    onClose: () => void
+    // Absent wherever there is no training run behind the page (the Explorer, uploaded files):
+    // the button is then not shown at all, rather than shown and broken.
+    onSimulate?: (m: Machine) => void
+    simulating?: boolean
+    error?: string
+  } = $props()
 
   // Which share of the search budget paid for this discovery. The uninformed 5% is the control
   // group, so a machine found by it means something different from one the model chose - worth
@@ -40,6 +54,19 @@
         onclick={onClose}>✕</button
       >
     </div>
+    {#if onSimulate}
+      <button
+        class="mb-3 w-full rounded bg-cyan-400 px-3 py-1.5 text-sm font-medium text-slate-900
+               hover:bg-cyan-300 disabled:cursor-wait disabled:opacity-60"
+        disabled={simulating}
+        onclick={() => onSimulate(machine)}
+      >
+        {simulating ? 'Simulating…' : '▶ Simulate'}
+      </button>
+      {#if error}
+        <p class="mb-3 rounded bg-rose-950/60 px-2 py-1 text-xs text-rose-300">{error}</p>
+      {/if}
+    {/if}
     <dl class="space-y-2">
       {#if machine.source && !t}
         <div>
