@@ -108,7 +108,7 @@ def main() -> None:
     print(f"\n  run         {args.out}")
     if hub is not None:
         print(f"  stream      {hub.url}")
-        print("  viewer      open the visualizer's Live Training page and press Connect")
+        print("  viewer      the Live Training page connects to this on its own")
     print(
         f"  plan        {config.loop.rounds} rounds x {config.loop.episodes_per_round} "
         f"episodes, k={config.search.k}, {config.search.simulations} simulator calls each"

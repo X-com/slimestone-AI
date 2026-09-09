@@ -76,9 +76,21 @@
   let status = $state<'idle' | 'connecting' | 'connected' | 'closed' | 'error'>('idle')
   let ws: WebSocket | null = null
 
-  // Auto-reconnect: if a live connection drops, retry every RETRY_MS until it comes back.
+  // Auto-reconnect: if a live connection drops, retry until it comes back.
+  //
+  // Two cadences, because the two situations are not alike. Before the first successful
+  // connection we are racing the training process's own startup - train.bat launches this
+  // viewer and the loop together, and the loop has a checkpoint to load before it binds - so
+  // retrying once a second turns that race into a barely-visible pause. After a connection has
+  // worked once, a drop means the run ended or the machine went away, and hammering it every
+  // second for hours would be pointless.
   const RETRY_MS = 30_000
-  let reconnect = $state(false)
+  const STARTUP_RETRY_MS = 1_000
+  let everConnected = $state(false) // read in the retry label, so it has to be reactive
+  const retryDelay = () => (everConnected ? RETRY_MS : STARTUP_RETRY_MS)
+  // On by default: this page exists to watch a run, and the overwhelmingly common case is that
+  // it was opened BY the thing it wants to watch.
+  let reconnect = $state(true)
   let retryPending = $state(false)
   let manualClose = false // user-initiated Disconnect must not trigger a retry
   let retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -95,7 +107,7 @@
       retryTimer = null
       retryPending = false
       connect()
-    }, RETRY_MS)
+    }, retryDelay())
   }
 
   const totalPages = $derived(Math.max(1, Math.ceil(machineCount / PAGE)))
@@ -227,6 +239,7 @@
     // failed reconnect leaves the last-seen machines on screen instead of blanking them.
     ws.onopen = () => {
       status = 'connected'
+      everConnected = true
       machines = []
       machineCount = 0
       latestBatch = []
@@ -290,6 +303,11 @@
     }
     bottomContainer.addEventListener('wheel', onWheel, { capture: true, passive: false })
     window.addEventListener('keydown', onKey)
+    // Connect without being asked. Nothing on this page is useful disconnected, and the flow
+    // that opened it (train.bat -> viewer + training) has no way to press a button. A failure
+    // here is not an error state to sit in: `reconnect` defaults on, so it keeps trying at the
+    // startup cadence until the loop finishes binding.
+    connect()
     const onFullscreenChange = () => (isFullscreen = document.fullscreenElement === rootEl)
     document.addEventListener('fullscreenchange', onFullscreenChange)
     return () => {
@@ -359,9 +377,14 @@
 
     <span class="rounded px-2 py-0.5 font-medium {statusColor}">{status}</span>
 
-    <label class="flex cursor-pointer items-center gap-1 text-slate-400" title="Retry every 30s if the connection drops">
+    <label
+      class="flex cursor-pointer items-center gap-1 text-slate-400"
+      title="Keep trying until the training run appears, then every 30s if it drops"
+    >
       <input type="checkbox" bind:checked={reconnect} onchange={onReconnectToggle} />
-      auto-reconnect{#if retryPending}<span class="text-amber-400"> · retrying in 30s</span>{/if}
+      auto-reconnect{#if retryPending}<span class="text-amber-400">
+          · retrying{everConnected ? ' in 30s' : '…'}</span
+        >{/if}
     </label>
 
     <span class="text-slate-400">
@@ -499,6 +522,9 @@
                 network access.
               </span>
             {/if}
+          {:else if connected || retryPending}
+            <span>Waiting for the training run at <span class="font-mono">{url}</span>…</span>
+            <span class="text-xs">It appears here as soon as the loop starts streaming.</span>
           {:else}
             <span>Connect to a training stream to see live machines.</span>
           {/if}

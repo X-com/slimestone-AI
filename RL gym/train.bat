@@ -101,8 +101,11 @@ if exist "%VISUALIZER%\package.json" (
             call npm install
             popd
         )
-        echo [3/4] Starting the viewer in a separate window.
-        start "flyer-web-visualizer" cmd /c "cd /d ""%VISUALIZER%"" && npm run dev"
+        echo [3/4] Starting the viewer and opening it on the Live Training page.
+        REM dev:live is `vite --open "/#/live"` - vite resolves its own port, so this still
+        REM opens the right tab when 5173 is taken and it falls back to 5174. The router is
+        REM hash-based, hence the #.
+        start "flyer-web-visualizer" cmd /c "cd /d ""%VISUALIZER%"" && npm run dev:live"
     )
 ) else (
     echo [3/4] flyer-web-visualizer not found next to RL gym - skipping the viewer.

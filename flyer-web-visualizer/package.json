@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:live": "vite --open \"/#/live\"",
     "build": "vite build",
     "preview": "vite preview",
     "sync-data": "cp ../genetic-ml/data/outputs/ga_archive.jsonl public/ga_archive.jsonl",

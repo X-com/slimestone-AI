@@ -30,7 +30,7 @@ work once and every run after it starts training in seconds:
 
     [1/4] labels    exhaustive k=1 ground truth        ~20 min, once, ever
     [2/4] stage 0   supervised on those labels         ~65 min, once, ever
-    [3/4] viewer    flyer-web-visualizer, own window   skipped if npm is missing
+    [3/4] viewer    flyer-web-visualizer, own window   opens the browser on Live Training
     [4/4] stage 1   the loop, streaming to the viewer  until you stop it
 
 It refuses to start, with the fix printed, if Python, numpy/torch/websockets, or the C++
@@ -40,9 +40,21 @@ is fully recorded to disk either way.
 
 ## Watching a run
 
-**The viewer is `flyer-web-visualizer`, not a page this project ships.** Open the URL its window
-prints, go to **Live Training**, and press Connect (`ws://localhost:8765`). Machines appear in 3D
-as they are found — orbit, zoom, click one for its details, page back through history.
+**The viewer is `flyer-web-visualizer`, not a page this project ships**, and there is nothing to
+click. `train.bat` runs `npm run dev:live` — `vite --open "/#/live"` — so the browser opens
+straight onto the Live Training page, and that page connects to `ws://localhost:8765` on its own.
+Machines appear in 3D as they are found: orbit, zoom, click one for its details, page back
+through history.
+
+**It connects before the training is listening, and that is fine.** `train.bat` starts the viewer
+and the loop together, and the loop has a checkpoint to load first, so the page's first attempt
+usually fails. Auto-reconnect is on by default and runs at **two cadences**: once a second until
+the first successful connection, then every 30 seconds. Without the split, the startup race would
+cost a blank 30-second stare on every single run; with only the fast rate, a finished run would be
+hammered once a second for as long as the tab stayed open.
+
+Vite resolves its own port, so the right tab still opens when 5173 is taken and it falls back to
+5174. The router is hash-based, hence the `#` in the path.
 
 `rlgym/stream.py` is the producer. Two frame kinds on one socket:
 
