@@ -414,8 +414,18 @@ def train(config: Config, out_dir: Path, corpus=None, quiet: bool = False) -> di
     bars = baseline_reference(corpus, training, held, config.train.eval_budget)
     metrics.log("baseline", **bars)
 
+    # A single-machine corpus has no held-out set, which is not a bug but does invalidate the
+    # measurement the ladder exists for - so it is said out loud rather than reported as 0.000.
+    selector = "held" if held else "train"
     if not quiet:
         print(f"machines: {len(training)} training, {len(held)} held out")
+        if not held:
+            print(
+                "  NO HELD-OUT SET - every machine in the corpus is a training machine.\n"
+                "  Generalisation is unmeasurable here: 'held auc' below is a constant 0.000\n"
+                "  and best.pt is selected on TRAIN auc instead. Useful for checking the loop\n"
+                "  runs; it cannot tell you the model learned rules rather than this machine."
+            )
         if skipped:
             print(
                 f"  SKIPPED {len(skipped)}: {', '.join(sorted(skipped))}"
@@ -478,31 +488,46 @@ def train(config: Config, out_dir: Path, corpus=None, quiet: bool = False) -> di
             save_checkpoint(out_dir / "last.pt", net, config, step, best)
             # Point 18: keep going past the first downturn and remember the best point. The
             # held-out measure is noisy at 7 machines and a dip is usually a wobble.
-            if on_held["auc"] > best:
-                best = on_held["auc"]
+            #
+            # With no held-out set that measure is a constant 0.000, so this would fire once at
+            # the first evaluation and never again - freezing best.pt at step 25 while every
+            # later step improved the model, and silently handing Stage 1 an untrained network.
+            # Selecting on train auc is worse science and vastly better than that.
+            score = (on_held if held else on_train)["auc"]
+            if score > best:
+                best = score
                 save_checkpoint(out_dir / "best.pt", net, config, step, best)
 
     wall = time.perf_counter() - started
     final = {
         "steps": config.train.steps,
         "wall_seconds": round(wall, 1),
+        "selected_on": selector,  # which auc chose best.pt - "train" means no held-out set
         "best_held_auc": best,
         "baseline_held_auc": bars["held"]["auc"],
-        "beats_baseline_1": best > bars["held"]["auc"],
+        "beats_baseline_1": best > bars[selector]["auc"],
         "parameters": net.n_parameters(),
     }
     metrics.log("final", **final)
     if not quiet:
+        label = "held-out AUC" if held else "TRAIN AUC"
         print(f"\n{'MILESTONE 2':<14}{'model':>10}{'baseline 1':>12}")
-        print(f"{'held-out AUC':<14}{best:>10.3f}{bars['held']['auc']:>12.3f}")
-        print(
-            "\n"
-            + (
-                "the model beats the only baseline that transfers."
-                if final["beats_baseline_1"]
-                else "the model does NOT beat baseline 1 yet."
+        print(f"{label:<14}{best:>10.3f}{bars[selector]['auc']:>12.3f}")
+        if held:
+            print(
+                "\n"
+                + (
+                    "the model beats the only baseline that transfers."
+                    if final["beats_baseline_1"]
+                    else "the model does NOT beat baseline 1 yet."
+                )
             )
-        )
+        else:
+            print(
+                "\nMILESTONE 2 IS NOT MEASURED HERE. Beating baseline 1 on the machine you\n"
+                "trained on is memorisation, not generalisation - the whole point of the\n"
+                "held-out split. This number says the training loop works, nothing more."
+            )
         print(f"wrote {out_dir}")
     return final
 

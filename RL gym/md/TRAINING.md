@@ -23,7 +23,13 @@ specification; this is the operating manual for what was built from it.
 
 ## The shortest way in
 
-**`train.bat`, here in `RL gym`. Double-click it.**
+**`train.bat`, here in `RL gym`. Double-click it.** To wipe everything and begin again,
+**`reset.bat`** beside it, then `train.bat`.
+
+Everything trains on **one fixture**, `simple_observer_engine`, named once at the top of
+`train.bat` so the labeller, the Stage 0 corpus and the Stage 1 loop cannot drift apart.
+Training across several machines at once is what made "is it learning?" unanswerable: a library
+seeded from six fixtures, a replay buffer mixing them, and checkpoints carrying all of it.
 
 It runs four stages and **skips any whose output already exists**, so a fresh clone does the slow
 work once and every run after it starts training in seconds:
@@ -37,6 +43,48 @@ It refuses to start, with the fix printed, if Python, numpy/torch/websockets, or
 simulator is missing — each of those failing later looks like a broken model rather than a
 missing tool. A missing viewer is deliberately **not** fatal: training is the point and the run
 is fully recorded to disk either way.
+
+## Starting over
+
+`reset.bat` deletes the **entire `data/` folder** and stops - it does not start training. It
+asks for `YES` first, and if something still holds a file open it says which files survived and
+refuses to pretend it succeeded: a partial reset is worse than none, because the next run looks
+fresh and is not.
+
+Everything, not a curated list, because a stale label file or a cached graph from a different
+fixture is invisible, is picked up silently, and contaminates exactly the test you were trying
+to run. All of it is produced by this project and rebuilds from the fixtures.
+
+| | |
+|---|---|
+| `data/runs/` | checkpoints (`stage0/best.pt`, `live/`), library, attempt log, metrics, replay |
+| `data/labels/` | Stage 0's supervised targets; ~1 min to rebuild for one fixture |
+| `data/graphs/` | graph cache, ~157 ms per machine |
+| `data/k2/` | exhaustive k=2 test set, ~25 min to rebuild - **the expensive one, gone too** |
+
+The fixtures live outside this folder and are never touched: they are inputs, not outputs.
+
+`data/` is tracked in git, so `git checkout -- "RL gym/data"` puts all of it back.
+
+## One fixture means no held-out set
+
+With a single machine in the corpus there is nothing to hold out, and that changes what Stage 0
+can tell you. Stage 0 says so itself on startup rather than reporting `held auc 0.000` as if it
+were a result:
+
+    machines: 1 training, 0 held out
+      NO HELD-OUT SET - every machine in the corpus is a training machine.
+      Generalisation is unmeasurable here...
+
+`best.pt` is then selected on **train** AUC. That is worse science and far better than the
+alternative: held AUC is a constant 0.000, so the "is this the best so far" test would fire once
+at the first evaluation and never again - freezing `best.pt` at step 25 while every later step
+improved the model, and silently handing Stage 1 an all-but-untrained network. The `final`
+metrics row records which was used, in `selected_on`.
+
+**MILESTONE 2 is not measurable in this configuration**, and beating baseline 1 here means
+nothing: it is the memorisation ceiling, measured on the machine you trained on. Restore the
+full corpus to measure generalisation again.
 
 ## Watching a run
 

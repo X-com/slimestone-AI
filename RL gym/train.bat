@@ -12,8 +12,11 @@ REM Everything below is the pipeline from md/TRAINING.md, in the same order, and
 REM SKIPPED if its output already exists - so the first run on a fresh clone does the slow work
 REM once and every run after it starts training in seconds.
 REM
-REM   labels      exhaustive k=1 ground truth        ~20 min, once, ever
-REM   stage 0     supervised on those labels         ~65 min, once, ever
+REM Everything runs on ONE fixture (%FIXTURE% below). reset.bat wipes the lot and
+REM re-runs this from nothing.
+REM
+REM   labels      exhaustive k=1 ground truth        ~1 min for one machine
+REM   stage 0     supervised on those labels         minutes, on one machine
 REM   viewer      the flyer-web-visualizer, in its own window
 REM   stage 1     the loop, streaming to that viewer  runs until you stop it
 REM
@@ -26,6 +29,10 @@ set "VISUALIZER=%GYM%..\flyer-web-visualizer"
 REM The WebSocket the loop streams discoveries on, and the port the viewer's Connect box
 REM defaults to. Change both together or the viewer will not find the run.
 set "PORT=8765"
+REM The ONE fixture everything trains on. Named once here so the labeller, the Stage 0 corpus
+REM and the Stage 1 loop cannot drift apart - which is exactly the confusion that training
+REM across several machines produced.
+set "FIXTURE=simple_observer_engine"
 
 pushd "%GYM%"
 
@@ -62,22 +69,22 @@ if not exist "%SIMULATOR%" (
 REM --- stage: the exhaustive k=1 corpus ---------------------------------------------------
 REM label_corpus caches per machine, so re-running it after an interrupted sweep resumes
 REM rather than starting over.
-if not exist "data\labels\simple_machine2.json" (
+if not exist "data\labels\%FIXTURE%.json" (
     echo.
-    echo [1/4] Labelling the corpus. This is a one-off and takes about 20 minutes.
-    echo       Interrupting is safe - it resumes from the machines already done.
+    echo [1/4] Labelling %FIXTURE% - every legal single-block change, simulated.
     echo.
-    "%PYTHON%" -m rlgym.labeller --all --out data\labels
+    "%PYTHON%" -m rlgym.labeller %FIXTURE% --out "data\labels\%FIXTURE%.json"
     if errorlevel 1 goto :fail
 ) else (
-    echo [1/4] Labels found - skipping the corpus sweep.
+    echo [1/4] Labels for %FIXTURE% found - skipping.
 )
 
 REM --- stage: supervised pre-training -----------------------------------------------------
 if not exist "data\runs\stage0\best.pt" (
     echo.
-    echo [2/4] Stage 0: supervised pre-training. One-off, about 65 minutes on CPU.
-    echo       The number to watch is held-out AUC against the baseline printed at the top.
+    echo [2/4] Stage 0: supervised pre-training on %FIXTURE%.
+    echo       With one fixture there is NO held-out set, so this cannot show generalisation -
+    echo       it shows that the loop trains. Stage 0 says so itself when it starts.
     echo.
     "%PYTHON%" -m rlgym.train --config configs\stage0.json --out data\runs\stage0
     if errorlevel 1 goto :fail
@@ -113,13 +120,13 @@ if exist "%VISUALIZER%\package.json" (
 
 REM --- stage: the loop --------------------------------------------------------------------
 echo.
-echo [4/4] Stage 1: the training loop, streaming to ws://localhost:%PORT%
+echo [4/4] Stage 1: the training loop on %FIXTURE%, streaming to ws://localhost:%PORT%
 echo       Open the viewer's printed URL, go to Live Training, and press Connect - discovered
 echo       machines appear in 3D as they are found. Ctrl-C stops the run; the library, metrics
 echo       and checkpoint are saved at the end of every round.
 echo.
 
-"%PYTHON%" -m rlgym.serve --config configs\stage1.json --checkpoint data\runs\stage0\best.pt --out data\runs\live --port %PORT%
+"%PYTHON%" -m rlgym.serve --config configs\stage1.json --checkpoint data\runs\stage0\best.pt --out data\runs\live --port %PORT% --machines %FIXTURE%
 
 echo.
 echo Finished with exit code %ERRORLEVEL%.
