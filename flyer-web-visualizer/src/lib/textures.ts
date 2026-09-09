@@ -14,6 +14,9 @@ const TEX_NAMES = [
   'stone', 'glass', 'slime', 'redstone_block',
   'piston_top', 'piston_top_sticky', 'piston_side', 'piston_side_sticky',
   'piston_bottom', 'piston_bottom_sticky',
+  // The body's front face once the head has slid away. Both variants ship in public/textures;
+  // only the non-sticky one was ever atlased, so a sticky piston had no inner face to show.
+  'piston_inner', 'piston_inner_sticky',
   'observer_front', 'observer_back', 'observer_side', 'observer_top',
   // DABB's "powered" observer reskins all 4 distinct faces (front/side/top/back), not just the
   // back arrow - see ignore/DABB/assets/minecraft/models/block/observer_powered.json.
@@ -48,9 +51,6 @@ const TEX_NAMES = [
   'shulker_top_red', 'shulker_top_silver', 'shulker_top_white', 'shulker_top_yellow', 'snow', 'soul_sand', 'sponge', 'stone_slab_side',
   'stone_slab_top', 'stonebrick', 'structure_block', 'tnt_bottom', 'tnt_side', 'tnt_top', 'trapdoor', 'waterlily',
   'wool_colored_white',
-  // The piston body's own front face while extended (the head has left, exposing the plain
-  // track/frame) - see the piston-inner overlay in animatedScene.ts.
-  'piston_inner',
   // Rails - excluded by the generator that produced the block above (their real Minecraft
   // boundingBox is "empty" - no collision - which the generator's air/water/lava filter also
   // caught by mistake). Picked back out and added by hand; one representative texture per rail
@@ -334,7 +334,26 @@ const FENCE_GATE_OPEN_OFFSET = 1000
 export function isFenceGate(blockId: number): boolean {
   return FENCE_GATE_IDS.has(blockId)
 }
+// An extended piston body is a different SHAPE, not just a different texture: vanilla's extended
+// piston is exactly two blocks long as 12/16 body + 16/16 of rod + 4/16 cap, so the body loses
+// 4/16 to the rod crossing its cell. Without this the body stayed a full cube wearing its
+// retracted front face (piston_top), which read as a piston head with another one glued in front.
+const PISTON_IDS = new Set([29, 33])
+const PISTON_HEAD_ID = 34
+// Meta bit 3 means "extended" on a piston body (29/33) and "sticky" on a piston head (34) -
+// BlockPistonExtension.TYPE. Both need a geometry the bare id does not have, so both borrow the
+// same offset; the ids differ, so the keys cannot collide.
+const PISTON_EXTENDED_OFFSET = 5000
+
+// Which head geometry belongs to a piston body id. animatedScene.ts synthesizes heads from the
+// extension timeline rather than from real blocks, so it has no meta to read and asks here.
+export function pistonHeadKeyFor(pistonBlockId: number): number {
+  return pistonBlockId === 29 ? PISTON_HEAD_ID + PISTON_EXTENDED_OFFSET : PISTON_HEAD_ID
+}
+
 export function renderKeyFor(blockId: number, meta: number): number {
+  if (PISTON_IDS.has(blockId) && (meta & 0b1000) !== 0) return blockId + PISTON_EXTENDED_OFFSET
+  if (blockId === PISTON_HEAD_ID && (meta & 0b1000) !== 0) return blockId + PISTON_EXTENDED_OFFSET
   if (FENCE_GATE_IDS.has(blockId) && (meta & 0b100) !== 0) return blockId + FENCE_GATE_OPEN_OFFSET
   if (RAIL_IDS.has(blockId)) {
     const shape = meta & 0xf
@@ -365,6 +384,10 @@ export const BLOCK_LIT_REDSTONE_LAMP = 124
 // else) - those just keep using renderKeyFor's single-geometry behavior via toggleBaseKeyFor's
 // fallback.
 export function toggleBaseKeyFor(blockId: number, meta: number): number {
+  // Pistons keep the full-cube body here even when they start extended. animatedScene animates
+  // extension itself - sliding a separate head instance and overlaying pistonInnerGeo - so
+  // handing it the shortened static body would shrink a piston that is mid-animation.
+  if (PISTON_IDS.has(blockId)) return blockId
   if (blockId === BLOCK_REDSTONE_LAMP || blockId === BLOCK_LIT_REDSTONE_LAMP) return BLOCK_REDSTONE_LAMP
   if (FENCE_GATE_IDS.has(blockId) || TRAPDOOR_IDS.has(blockId)) return blockId
   if (POWERABLE_RAIL_IDS.has(blockId)) {
@@ -418,7 +441,7 @@ const RAIL_ELEV = 1 / 32
 export const RAIL_ASCEND_OFFSET = 2000
 const RAIL_ASCEND_SHAPES = new Set([2, 3, 4, 5]) // ASCENDING_EAST/WEST/NORTH/SOUTH
 
-const N = 15 // atlas grid (15x15 = 225 cells, all used)
+const N = 15 // atlas grid (15x15 = 225 cells; 222 used)
 const CELL = 16
 
 export interface BlockAssets {
@@ -495,6 +518,13 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
     // BoxGeometry face index (0=+x,1=-x,2=+y,3=-y,4=+z,5=-z). 'both' flips u and v together (a
     // 180-degree in-plane rotation, vs. a single-axis mirror).
     flipFaces?: Partial<Record<number, 'u' | 'v' | 'both'>>,
+    // Per-face [u0, v0, u1, v1] sub-rectangle of the texture, 0..1, v measured from the BOTTOM of
+    // the image. Without this a shortened box stretches the whole 16x16 image over its smaller
+    // face - so an extended piston body squashed piston_side's head collar down into the body,
+    // and the arm wore the entire side texture instead of the 4-pixel shaft strip. Vanilla's own
+    // models carry explicit per-face uvs for exactly this reason (piston_extended.json,
+    // piston_head.json); this is the same idea with the same numbers.
+    uvRects?: Partial<Record<number, readonly [number, number, number, number]>>,
   ): THREE.BufferGeometry {
     const geo = new THREE.BoxGeometry(...size)
     const uv = geo.attributes.uv as THREE.BufferAttribute
@@ -512,6 +542,11 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
         }
         if (flip === 'u' || flip === 'both') u = 1 - u
         if (flip === 'v' || flip === 'both') v = 1 - v
+        const rect = uvRects?.[f]
+        if (rect) {
+          u = rect[0] + u * (rect[2] - rect[0])
+          v = rect[1] + v * (rect[3] - rect[1])
+        }
         const fu = PAD + u * (1 - 2 * PAD)
         const fv = PAD + v * (1 - 2 * PAD)
         uv.setXY(idx, (col + fu) / N, (N - 1 - row + fv) / N)
@@ -630,13 +665,65 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
   // Built along +Y (local "front" = top), matching frontAxis(34) === AXIS_Y - the scene rotates
   // +Y to the block's real facing, so the cap must sit on +Y here, not +Z (a +Z build would face
   // sideways for every piston not already pointing north/south).
-  geos.set(
-    34,
-    mergeGeometries([
-      bake(['piston_side', 'piston_side', 'piston_top', 'piston_side', 'piston_side', 'piston_side'], [1, 4 / 16, 1], [0, 0.5 - 2 / 16, 0]),
-      bake(['piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side', 'piston_side'], [4 / 16, 12 / 16, 4 / 16], [0, -0.125, 0]),
-    ]),
-  )
+  //
+  // The arm's four sides take piston_side's 4-pixel shaft strip (u 6..10, vanilla's own
+  // piston_head.json uv), not the whole texture. Its v range starts at 4/16 because the first
+  // 4/16 of the arm is baked into the extended BODY (see below) - the two halves have to sample
+  // one continuous strip or the arm changes texture density at the cell boundary.
+  const ARM = 4 / 16
+  const armSides = (v0: number, v1: number) =>
+    ({ 0: [6 / 16, v0, 10 / 16, v1], 1: [6 / 16, v0, 10 / 16, v1],
+       4: [6 / 16, v0, 10 / 16, v1], 5: [6 / 16, v0, 10 / 16, v1] }) as const
+  const SIDES6 = (t: TexName) => [t, t, t, t, t, t] as const
+  // A sticky head (meta bit 3 on id 34) takes the sticky cap AND the sticky side texture: this
+  // pack ships distinct piston_side/piston_side_sticky images, and the arm is one continuous rod
+  // shared with the body's stub below, so mixing the two would show a seam mid-arm.
+  for (const [key, cap, side] of [
+    [34, 'piston_top', 'piston_side'],
+    [34 + PISTON_EXTENDED_OFFSET, 'piston_top_sticky', 'piston_side_sticky'],
+  ] as const) {
+    geos.set(
+      key,
+      mergeGeometries([
+        bake([side, side, cap, side, side, side], [1, 4 / 16, 1], [0, 0.5 - 2 / 16, 0]),
+        bake(SIDES6(side), [ARM, 12 / 16, ARM], [0, -0.125, 0], false, undefined, armSides(4 / 16, 1)),
+      ]),
+    )
+  }
+
+  // Extended piston bodies, keyed by renderKeyFor's PISTON_EXTENDED_OFFSET. Two boxes merged the
+  // same way the piston head (id 34) is:
+  //
+  //   body       12/16 deep, back-aligned, spanning -0.5 .. 0.25 - `piston_inner` on the front
+  //              face, because the head has slid away and exposed the plain track
+  //   rod stub   the 4/16 of rod that crosses THIS cell, spanning 0.25 .. 0.5
+  //
+  // The stub is what makes the shape right rather than merely shorter. Id 34 bakes its cap and
+  // only 12/16 of rod inside its own cell, so a bare 12/16 body would leave a 4/16 hole between
+  // body and head. Baking the stub here keeps id 34 untouched, which matters because
+  // animatedScene.ts slides that same geometry during a push.
+  //
+  // Built along +Y for the same reason as the head: piston_top/piston_inner is always the +Y face
+  // for these ids (FACES[33]/[29]), matching frontAxis(33|29) === AXIS_Y.
+  //
+  // The body's four sides show only the BOTTOM 12/16 of piston_side. The top 4 rows of that
+  // texture are the head collar, which belongs to the head once this piston is extended - leaving
+  // them in squashed the collar into the body and was the visible "wrong sides" bug.
+  for (const [id, side, bottom, inner] of [
+    [33, 'piston_side', 'piston_bottom', 'piston_inner'],
+    [29, 'piston_side_sticky', 'piston_bottom_sticky', 'piston_inner_sticky'],
+  ] as const) {
+    const body = { 0: [0, 0, 1, 12 / 16], 1: [0, 0, 1, 12 / 16],
+                   4: [0, 0, 1, 12 / 16], 5: [0, 0, 1, 12 / 16] } as const
+    geos.set(
+      id + PISTON_EXTENDED_OFFSET,
+      mergeGeometries([
+        bake([side, side, inner, bottom, side, side], [1, 12 / 16, 1], [0, -2 / 16, 0], false, undefined, body),
+        // The first 4/16 of the arm, crossing this cell - the strip the head's arm continues from.
+        bake(SIDES6(side), [ARM, ARM, ARM], [0, 0.5 - 2 / 16, 0], false, undefined, armSides(0, 4 / 16)),
+      ]),
+    )
+  }
 
   // Observer "on" box - same face layout as FACES[218] (side/side/top/top/front/back, eyes
   // toward facingVec, arrow away) but using the DABB-powered variant of every face, baked with
@@ -657,7 +744,7 @@ export async function loadBlockAssets(base: string): Promise<BlockAssets> {
   // the +Y face for these ids (see FACES[33]/[29]), matching frontAxis(33|29) === AXIS_Y.
   const pistonInnerGeos = new Map<number, THREE.BufferGeometry>([
     [33, bake(['piston_side', 'piston_side', 'piston_inner', 'piston_side', 'piston_side', 'piston_side'])],
-    [29, bake(['piston_side_sticky', 'piston_side_sticky', 'piston_inner', 'piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky'])],
+    [29, bake(['piston_side_sticky', 'piston_side_sticky', 'piston_inner_sticky', 'piston_side_sticky', 'piston_side_sticky', 'piston_side_sticky'])],
   ])
   const pistonInnerMat = new THREE.MeshLambertMaterial({
     map: atlas,

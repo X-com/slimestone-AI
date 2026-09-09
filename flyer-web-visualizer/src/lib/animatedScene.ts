@@ -20,7 +20,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { BLOCK_TYPES, decodeState } from './blocks'
 import {
   loadBlockAssets, frontAxis, toggleBaseKeyFor, toggleAltKeyFor, isRail, railQuaternion,
-  observerQuaternion, BLOCK_LIT_REDSTONE_LAMP, type BlockAssets,
+  observerQuaternion, pistonHeadKeyFor, BLOCK_LIT_REDSTONE_LAMP, type BlockAssets,
 } from './textures'
 import type { Machine, MachineEvent, PoweredStep } from './data'
 
@@ -603,14 +603,19 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       const d = decodeState(initial.state)
       const facing = new THREE.Vector3(...d.facingVec)
       const bodyPos = toWorld(initial.x, initial.y, initial.z)
-      return [{ blockIndex: ext.blockIndex, bodyPos, facing, quat, keyframes: ext.steps as ExtKeyframe[] }]
+      // A synthesized head has no block of its own and so no meta to read - stickiness comes from
+      // the piston it belongs to. Without this every animated head rendered as a plain piston.
+      return [{ blockIndex: ext.blockIndex, bodyPos, facing, quat, keyframes: ext.steps as ExtKeyframe[],
+                headKey: pistonHeadKeyFor(d.blockId) }]
     })
-    if (extEntries.length) {
-      const geo = assets ? assets.geo(PISTON_HEAD_ID) : plainBox
-      const mat = assets ? assets.material(PISTON_HEAD_ID) : coloredMat(PISTON_HEAD_ID)
-      const headMesh = new THREE.InstancedMesh(geo, mat, extEntries.length)
+    // One mesh per head geometry - sticky and plain pistons in the same machine need two.
+    for (const key of new Set(extEntries.map((e) => e.headKey))) {
+      const group = extEntries.filter((e) => e.headKey === key)
+      const geo = assets ? assets.geo(key) : plainBox
+      const mat = assets ? assets.material(key) : coloredMat(PISTON_HEAD_ID)
+      const headMesh = new THREE.InstancedMesh(geo, mat, group.length)
       headMesh.frustumCulled = false
-      extEntries.forEach((e, i) => {
+      group.forEach((e, i) => {
         dummy.position.copy(e.bodyPos)
         dummy.quaternion.copy(e.quat)
         dummy.scale.set(1, 1, 1)
@@ -620,11 +625,11 @@ export function createAnimatedScene(container: HTMLElement): AnimatedSceneHandle
       headMesh.instanceMatrix.needsUpdate = true
       scene.add(headMesh)
       meshes.push(headMesh)
-      heads = extEntries.map((e, i) => ({
+      heads.push(...group.map((e, i) => ({
         blockIndex: e.blockIndex, mesh: headMesh, instanceIndex: i, quat: e.quat, bodyPos: e.bodyPos, facing: e.facing,
         keyframes: e.keyframes, renderBlend: e.keyframes[0].extended ? 1 : 0,
         transFrom: null, transTo: null,
-      }))
+      })))
     }
 
     // Trigger glow (purple, matches scene.ts's multi-machine view) - only while parked at the real
