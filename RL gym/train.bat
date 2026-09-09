@@ -14,13 +14,17 @@ REM once and every run after it starts training in seconds.
 REM
 REM   labels      exhaustive k=1 ground truth        ~20 min, once, ever
 REM   stage 0     supervised on those labels         ~65 min, once, ever
-REM   stage 1     the loop, with the dashboard       runs until you stop it
+REM   viewer      the flyer-web-visualizer, in its own window
+REM   stage 1     the loop, streaming to that viewer  runs until you stop it
 REM
 REM Same conventions as the other launchers in this repo (see reinforcement learning/run-rl.bat).
 
 set "GYM=%~dp0"
 set "PYTHON=D:\ProgramFiles\Python313\python.exe"
 set "SIMULATOR=%GYM%..\cpp simulator\build\cpp_simulator_stream.exe"
+set "VISUALIZER=%GYM%..\flyer-web-visualizer"
+REM The WebSocket the loop streams discoveries on, and the port the viewer's Connect box
+REM defaults to. Change both together or the viewer will not find the run.
 set "PORT=8765"
 
 pushd "%GYM%"
@@ -35,13 +39,13 @@ if not exist "%PYTHON%" (
     goto :fail
 )
 
-"%PYTHON%" -c "import numpy, torch" 2>nul
+"%PYTHON%" -c "import numpy, torch, websockets" 2>nul
 if errorlevel 1 (
     echo.
-    echo numpy and torch are needed and are not installed for:
+    echo numpy, torch and websockets are needed and at least one is missing for:
     echo   %PYTHON%
     echo.
-    echo   "%PYTHON%" -m pip install numpy torch
+    echo   "%PYTHON%" -m pip install numpy torch websockets
     goto :fail
 )
 
@@ -60,32 +64,56 @@ REM label_corpus caches per machine, so re-running it after an interrupted sweep
 REM rather than starting over.
 if not exist "data\labels\simple_machine2.json" (
     echo.
-    echo [1/3] Labelling the corpus. This is a one-off and takes about 20 minutes.
+    echo [1/4] Labelling the corpus. This is a one-off and takes about 20 minutes.
     echo       Interrupting is safe - it resumes from the machines already done.
     echo.
     "%PYTHON%" -m rlgym.labeller --all --out data\labels
     if errorlevel 1 goto :fail
 ) else (
-    echo [1/3] Labels found - skipping the corpus sweep.
+    echo [1/4] Labels found - skipping the corpus sweep.
 )
 
 REM --- stage: supervised pre-training -----------------------------------------------------
 if not exist "data\runs\stage0\best.pt" (
     echo.
-    echo [2/3] Stage 0: supervised pre-training. One-off, about 65 minutes on CPU.
+    echo [2/4] Stage 0: supervised pre-training. One-off, about 65 minutes on CPU.
     echo       The number to watch is held-out AUC against the baseline printed at the top.
     echo.
     "%PYTHON%" -m rlgym.train --config configs\stage0.json --out data\runs\stage0
     if errorlevel 1 goto :fail
 ) else (
-    echo [2/3] Stage 0 checkpoint found - skipping supervised pre-training.
+    echo [2/4] Stage 0 checkpoint found - skipping supervised pre-training.
 )
 
-REM --- stage: the loop, with the dashboard ------------------------------------------------
+REM --- stage: the viewer ------------------------------------------------------------------
+REM Started in its own window, and NOT waited on: `npm run dev` never returns, so a `call` here
+REM would hang before training ever began. Failing to start the viewer is deliberately not
+REM fatal - training is the point, and the run is still fully recorded to disk without it.
+if exist "%VISUALIZER%\package.json" (
+    where npm >nul 2>nul
+    if errorlevel 1 (
+        echo [3/4] npm not on PATH - skipping the viewer, training will still run.
+        echo       Install Node.js to see discoveries in 3D: https://nodejs.org
+    ) else (
+        if not exist "%VISUALIZER%\node_modules" (
+            echo [3/4] Installing the viewer's dependencies, one-off...
+            pushd "%VISUALIZER%"
+            call npm install
+            popd
+        )
+        echo [3/4] Starting the viewer in a separate window.
+        start "flyer-web-visualizer" cmd /c "cd /d ""%VISUALIZER%"" && npm run dev"
+    )
+) else (
+    echo [3/4] flyer-web-visualizer not found next to RL gym - skipping the viewer.
+)
+
+REM --- stage: the loop --------------------------------------------------------------------
 echo.
-echo [3/3] Stage 1: the training loop. A browser tab opens at http://127.0.0.1:%PORT%/
-echo       Discovered machines appear there as they are found. Ctrl-C stops the run - the
-echo       library, metrics and checkpoint are saved at the end of every round.
+echo [4/4] Stage 1: the training loop, streaming to ws://localhost:%PORT%
+echo       Open the viewer's printed URL, go to Live Training, and press Connect - discovered
+echo       machines appear in 3D as they are found. Ctrl-C stops the run; the library, metrics
+echo       and checkpoint are saved at the end of every round.
 echo.
 
 "%PYTHON%" -m rlgym.serve --config configs\stage1.json --checkpoint data\runs\stage0\best.pt --out data\runs\live --port %PORT%

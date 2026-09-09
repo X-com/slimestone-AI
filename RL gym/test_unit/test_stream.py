@@ -1,0 +1,208 @@
+"""The discovery stream - rlgym/stream.py.
+
+What matters here is that a real browser can read what this sends, so the tests connect a real
+WebSocket client to a real server rather than calling methods on the hub. Two things they are
+specifically guarding:
+
+  * **the wire format the viewer already speaks** - `parseCompactData` in the visualizer reads a
+    20-byte header plus 16 bytes per block, and a producer that drifts from that fails as an
+    empty page rather than as an error;
+  * **the backlog cap** - the viewer resets on every connect, so history must be resent, and the
+    integration doc's own Notes warn that an uncapped backlog is what breaks a long run.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import struct
+
+import pytest
+
+from rlgym.game import encode_candidate
+from rlgym.stream import StreamHub
+
+websockets = pytest.importorskip("websockets", reason="the stream needs websockets")
+
+HEADER = struct.Struct("<iiiiI")  # exactly what data.ts:parseCompactData expects
+BLOCK = struct.Struct("<iiiI")
+
+
+@pytest.fixture
+def hub():
+    """A hub on an OS-chosen port, so the suite never collides with a real training run."""
+    hub = StreamHub(host="127.0.0.1", port=0)
+    assert hub.start(), f"hub failed to bind: {hub.error}"
+    # Port 0 means the OS picked one; ask the server what it actually got.
+    hub.port = hub._server.sockets[0].getsockname()[1]
+    yield hub
+    hub.stop()
+
+
+def candidate(cid: int = 0, blocks: int = 3):
+    return {
+        "id": cid,
+        "trigger": {"x": 1, "y": 2, "z": 3},
+        "blocks": [{"x": i, "y": 0, "z": 0, "state": 20} for i in range(blocks)],
+    }
+
+
+async def _collect(url: str, frames: int, timeout: float = 5.0):
+    async with websockets.connect(url) as ws:
+        return [await asyncio.wait_for(ws.recv(), timeout) for _ in range(frames)]
+
+
+def collect(hub: StreamHub, frames: int):
+    return asyncio.run(_collect(hub.url, frames))
+
+
+# --- the wire format --------------------------------------------------------------------
+
+
+def test_a_frame_is_records_the_visualizer_can_parse(hub):
+    """Decoded the way data.ts does it, byte offset by byte offset. If this drifts, the viewer
+    shows an empty page rather than an error, so it is checked here and not there."""
+    hub.publish([(candidate(blocks=2), {"name": "m"})])
+    binary, _ = collect(hub, 2)
+
+    assert isinstance(binary, bytes)
+    cid, tx, ty, tz, count = HEADER.unpack_from(binary, 0)
+    assert (tx, ty, tz) == (1, 2, 3)
+    assert count == 2
+    assert len(binary) == HEADER.size + count * BLOCK.size
+    x, y, z, state = BLOCK.unpack_from(binary, HEADER.size)
+    assert (x, y, z, state) == (0, 0, 0, 20)
+
+
+def test_several_machines_ride_in_one_frame(hub):
+    """The records are self-delimiting with no outer length prefix, so one frame is one batch
+    of any size - which is what makes the viewer's 'Latest batch' viewport meaningful."""
+    hub.publish([(candidate(blocks=1), {}), (candidate(blocks=4), {}), (candidate(blocks=2), {})])
+    binary, _ = collect(hub, 2)
+
+    sizes, offset = [], 0
+    while offset < len(binary):
+        count = HEADER.unpack_from(binary, offset)[4]
+        sizes.append(count)
+        offset += HEADER.size + count * BLOCK.size
+    assert sizes == [1, 4, 2]
+    assert offset == len(binary), "the split must account for every byte, exactly"
+
+
+def test_the_encoder_is_the_projects_own(hub):
+    """Not a second implementation. game.py already emits this format and round-trips it."""
+    machine = candidate(cid=7, blocks=3)
+    hub.publish([(machine, {})])
+    binary, _ = collect(hub, 2)
+    assert binary == encode_candidate({**machine, "id": 0}), "ids are reassigned by the hub"
+
+
+# --- metadata ---------------------------------------------------------------------------
+
+
+def test_metadata_arrives_keyed_by_the_id_in_the_record(hub):
+    """The compact format carries geometry only, so everything else rides a second JSON frame.
+    The join key has to be the id inside the binary record or the two cannot be matched up."""
+    hub.publish([(candidate(), {"name": "gen1-abc", "period": 20, "redundant_removed": 2})])
+    binary, text = collect(hub, 2)
+
+    stream_id = HEADER.unpack_from(binary, 0)[0]
+    payload = json.loads(text)
+    entry = payload["machines"][str(stream_id)]
+    assert entry["name"] == "gen1-abc"
+    assert entry["period"] == 20
+    assert entry["redundant_removed"] == 2
+
+
+def test_ids_are_unique_across_batches(hub):
+    """The loop builds every candidate with cid=0. Without reassignment every machine would
+    collide on id 0 and the whole run would share one metadata entry."""
+    hub.publish([(candidate(), {"name": "a"}), (candidate(), {"name": "b"})])
+    hub.publish([(candidate(), {"name": "c"})])
+    binary, text = collect(hub, 2)  # a reconnect gets the whole backlog
+
+    ids, offset = [], 0
+    while offset < len(binary):
+        cid, _, _, _, count = HEADER.unpack_from(binary, offset)
+        ids.append(cid)
+        offset += HEADER.size + count * BLOCK.size
+    assert len(set(ids)) == 3, "ids collided"
+    names = [json.loads(text)["machines"][str(i)]["name"] for i in ids]
+    assert names == ["a", "b", "c"]
+
+
+def test_run_stats_ride_along(hub):
+    hub.publish([(candidate(), {})], run={"round": 3, "rounds": 10, "library": 12})
+    _, text = collect(hub, 2)
+    assert json.loads(text)["run"] == {"round": 3, "rounds": 10, "library": 12}
+
+
+def test_a_barren_round_still_reports(hub):
+    """"Nothing found this round" is a result. A stats strip frozen at the last good round
+    would show it as still current, which is worse than showing zero."""
+    hub.publish([], run={"round": 4, "library": 12})
+    hub.publish([(candidate(), {})], run={"round": 5, "library": 13})
+    _, text = collect(hub, 2)
+    assert json.loads(text)["run"]["round"] == 5
+
+
+# --- the backlog ------------------------------------------------------------------------
+
+
+def test_a_late_client_is_backfilled(hub):
+    """The viewer clears its history on every open, so history must be resent or auto-reconnect
+    repopulates an empty page."""
+    hub.publish([(candidate(), {"name": "before"})])
+    binary, text = collect(hub, 2)
+    assert len(binary) > 0
+    assert [m["name"] for m in json.loads(text)["machines"].values()] == ["before"]
+    assert json.loads(text)["backfill"] is True
+
+
+def test_the_backlog_is_capped(hub):
+    """The integration doc's own Notes warn about this, and the failure is not a slowdown: the
+    client appends a frame with `machines.push(...batch)`, which spreads into arguments and
+    throws RangeError on a large enough one (measured in V8: fine at 100,000, RangeError at 200,000).
+    An uncapped backlog eventually crashes the page rather than slowing it."""
+    hub._backlog = type(hub._backlog)(maxlen=5)
+    for index in range(20):
+        hub.publish([(candidate(), {"name": f"m{index}"})])
+    assert hub.backlog_size == 5
+
+    binary, text = collect(hub, 2)
+    names = [m["name"] for m in json.loads(text)["machines"].values()]
+    assert names == ["m15", "m16", "m17", "m18", "m19"], "the cap must drop the OLDEST"
+
+    count = 0
+    offset = 0
+    while offset < len(binary):
+        blocks = HEADER.unpack_from(binary, offset)[4]
+        count += 1
+        offset += HEADER.size + blocks * BLOCK.size
+    assert count == 5, "geometry and metadata disagree about what the backlog holds"
+
+
+def test_publishing_with_nobody_listening_is_harmless(hub):
+    """The common case: training starts before anyone opens the page."""
+    assert hub.clients == 0
+    assert hub.publish([(candidate(), {})]) == 1
+    assert hub.backlog_size == 1
+
+
+# --- failure modes ----------------------------------------------------------------------
+
+
+def test_a_port_already_in_use_is_reported_not_swallowed(hub):
+    """`serve.py` prints a warning and trains anyway. It can only do that if `start()` tells the
+    truth about having bound - a hub that failed silently looks exactly like a viewer that will
+    not connect."""
+    second = StreamHub(host="127.0.0.1", port=hub.port)
+    try:
+        assert second.start() is False
+        assert second.error is not None
+    finally:
+        second.stop()
+
+
+def test_publish_returns_what_it_sent(hub):
+    assert hub.publish([]) == 0
+    assert hub.publish([(candidate(), {}), (candidate(), {})]) == 2

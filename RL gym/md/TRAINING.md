@@ -18,46 +18,86 @@ specification; this is the operating manual for what was built from it.
 | `recall.py` | MILESTONE 3 — recall@B against exhaustive k=2 ground truth |
 | `metrics.py` | one JSONL row per evaluation, carrying the whole config |
 | `bench.py` | timing, never fails the build |
-| `serve.py` | the dashboard, and the one command a launcher needs |
+| `stream.py` | discoveries to the flyer-web-visualizer, over a WebSocket |
+| `serve.py` | training plus the stream and the heartbeat — what the launcher runs |
 
 ## The shortest way in
 
 **`train.bat`, here in `RL gym`. Double-click it.**
 
-It runs the three stages below in order and **skips any whose output already exists**, so a
-fresh clone does the slow work once and every run after it starts training in seconds. It
-refuses to start, with the fix printed, if Python, numpy/torch, or the C++ simulator is
-missing - each of those failing later looks like a broken model rather than a missing tool.
+It runs four stages and **skips any whose output already exists**, so a fresh clone does the slow
+work once and every run after it starts training in seconds:
 
-The last stage is `rlgym.serve`, which is the ordinary loop plus two things:
+    [1/4] labels    exhaustive k=1 ground truth        ~20 min, once, ever
+    [2/4] stage 0   supervised on those labels         ~65 min, once, ever
+    [3/4] viewer    flyer-web-visualizer, own window   skipped if npm is missing
+    [4/4] stage 1   the loop, streaming to the viewer  until you stop it
 
-    a dashboard    http://127.0.0.1:8765/ - every discovered machine as it is admitted,
-                   each downloadable as fixture JSON so it opens in the existing visualiser
-    a heartbeat    a console line every 15 seconds
+It refuses to start, with the fix printed, if Python, numpy/torch/websockets, or the C++
+simulator is missing — each of those failing later looks like a broken model rather than a
+missing tool. A missing viewer is deliberately **not** fatal: training is the point and the run
+is fully recorded to disk either way.
 
-The heartbeat exists because a round takes minutes and prints only at its end, so the console
-is otherwise silent for long enough to look like a crash - which is exactly when someone kills
-a healthy run. It prints only when the attempt or library count actually moved, so a genuinely
-stuck loop goes quiet and that silence means something.
+## Watching a run
+
+**The viewer is `flyer-web-visualizer`, not a page this project ships.** Open the URL its window
+prints, go to **Live Training**, and press Connect (`ws://localhost:8765`). Machines appear in 3D
+as they are found — orbit, zoom, click one for its details, page back through history.
+
+`rlgym/stream.py` is the producer. Two frame kinds on one socket:
+
+| frame | carries |
+|---|---|
+| binary | the machines, as concatenated compact records |
+| text | one JSON object: per-machine metadata, plus the round's stats |
+
+The binary half needed **no new format**: `parseCompactData` in the viewer reads a 20-byte
+`<iiiiI>` header plus 16-byte `<iiiI>` blocks, which is byte-for-byte what
+`game.py:encode_candidate` already emits. The text half exists because that format carries
+geometry and nothing else, so period, shift, generation, round found and the redundant-block
+count have nowhere else to travel. They are joined on the `id` in each record's own header.
+
+**One batch per round, not one per machine.** The viewer's top viewport is captioned "Latest
+batch"; a batch per discovery would make it flicker on every find while saying no more than the
+console already does.
+
+**The backlog is capped at 2,000 records.** The viewer resets its history on every connect, so
+the server must resend it or auto-reconnect repopulates an empty page — and an uncapped backlog
+is a crash, not a slowdown. See below.
+
+The console still prints the heartbeat, because a round takes minutes and prints only at its end:
 
     loaded data/runs/stage0/best.pt (step 400)
 
-      dashboard   http://127.0.0.1:8765/
       run         data/runs/live
+      stream      ws://localhost:8765
+      viewer      open the visualizer's Live Training page and press Connect
       plan        10 rounds x 8 episodes, k=2, 120 simulator calls each
       stop        Ctrl-C
 
-      ...    8s   attempts     22   library    5   replay     30
-      ...   16s   attempts     36   library    6   replay     50
-    round   1   118.4s   functional/1k: model  181.82  control  16.67 ...
+      ...   10s   attempts     34   library    5   replay     46   viewers 1
+    round   1  118.9s   functional/1k: model 106.38  control 500.00 ...
 
-The training thread owns the data and the server only reads it, so the dashboard cannot affect
-a run. Ctrl-C stops training and leaves the page up to browse what was found; every round has
-already saved its library, metrics row and checkpoint, so an interrupted run loses at most the
-round in progress.
+## Why the dashboard used to lag, measured
 
-**Stdlib only** - `http.server`, no framework. `pyproject.toml` declares no dependencies and
-this does not change that.
+Not the 3D. Only `PAGE = 25` machines are ever in a scene and `scene.ts` already packs one
+`InstancedMesh` per block type, so ten thousand discoveries render exactly as fast as
+twenty-five. Both real causes were in the data layer, and both were measured in V8 rather than
+guessed at:
+
+| | before | after |
+|---|---|---|
+| appending a 200,000-machine backlog | **RangeError: Maximum call stack size exceeded** | 3.3 ms |
+| 2,000 scene rebuilds of 25 machines | 1,283 ms | **39 ms** |
+
+The first is `machines.push(...batch)`, which spreads the batch into *arguments* — fine at
+100,000, fatal at 200,000, and `trimHistory()` runs after the append so the client's own 2,500
+cap never protected it. Fixed by capping the backlog server-side and appending with a loop.
+
+The second is Svelte 5's `$state`, which deep-proxies everything written into it — about 40,000
+block objects at the history cap, every one of them read through a proxy trap by `setMachines`'s
+three `blocks.map()` passes. History needs no reactivity at all: only the length is ever
+observed, so it became a plain array beside one `$state` counter. **33x** on that read pattern.
 
 ## The three stages
 
@@ -66,7 +106,7 @@ py -m rlgym.labeller --all --out data/labels        # once, ~20 min. The corpus.
 py -m rlgym.baselines --budget 100                  # the ladder rungs 0-3. The bar.
 py -m rlgym.train --config configs/stage0.json      # Stage 0. Supervised, no search.
 py -m rlgym.loop  --config configs/stage1.json --checkpoint data/runs/stage0/best.pt
-py -m rlgym.serve --config configs/stage1.json --checkpoint data/runs/stage0/best.pt
+py -m rlgym.serve --config configs/stage1.json --checkpoint data/runs/stage0/best.pt   # + viewer
 py -m rlgym.labeller simple_machine2 --k2           # once, ~25 min. MILESTONE 3's denominator.
 py -m rlgym.recall --budget 1000                    # MILESTONE 3. Recall against that.
 py bench.py

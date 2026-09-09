@@ -108,6 +108,46 @@ export interface MachineEvent {
   blockIndex: number
 }
 
+// Training metadata for a machine discovered by the RL loop, delivered on a SECOND frame
+// alongside the binary geometry (see rlgym/stream.py). The compact .data format carries
+// geometry and nothing else, so none of this can ride in the record itself; the join key is the
+// `id` in the record's own header.
+export interface Training {
+  id: number
+  name: string
+  digest: string
+  parent: string
+  generation: number
+  round_found: number
+  source: string // top | sampled | uninformed - which share of the budget paid for it
+  period: number
+  shift: [number, number, number]
+  blocks: number
+  redundant_removed: number // blocks stripped as load-bearing-free before admission
+  added_is_load_bearing: boolean
+}
+
+// The run itself, refreshed once per round. Drives the dashboard's stats strip.
+export interface RunStats {
+  round: number
+  rounds: number
+  seconds: number
+  model_per_1k: number
+  control_per_1k: number
+  stripped: number
+  stopped: number
+  mean_depth: number
+  library: number
+  replay: number
+  attempts: number
+}
+
+export interface TrainingFrame {
+  machines: Record<string, Training>
+  run: Partial<RunStats>
+  backfill?: boolean
+}
+
 export interface Machine {
   hash: string // unique id + selection key (archive: structural hash; uploaded: synthetic)
   label?: string // float text override (uploaded uses "#id"); archive falls back to hash[:8]
@@ -126,6 +166,26 @@ export interface Machine {
   powered?: BlockPowered[]
   events?: MachineEvent[]
   terminationTick?: number
+  // Present only on machines streamed from the RL training loop, applied by applyTraining().
+  training?: Training
+}
+
+// Attach training metadata to machines already decoded by parseCompactData, matching on the
+// candidate id the hub stamped into each record. Mutates in place and returns how many matched:
+// a zero here means the two frames disagree about ids, which is otherwise invisible - the page
+// just quietly shows no metadata, exactly as it did before any of this existed.
+export function applyTraining(machines: Machine[], meta: Record<string, Training>): number {
+  let matched = 0
+  for (const m of machines) {
+    const info = meta[String(m.candidate.id)]
+    if (!info) continue
+    m.training = info
+    m.label = info.name // the float label becomes the library name, not a bare "#id"
+    m.generation = info.generation
+    m.origin = 'training'
+    matched++
+  }
+  return matched
 }
 
 export async function loadMachines(

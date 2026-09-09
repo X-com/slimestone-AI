@@ -1,6 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { parseCompactData, type Machine } from './lib/data'
+  import {
+    applyTraining,
+    parseCompactData,
+    type Machine,
+    type RunStats,
+    type Training,
+    type TrainingFrame,
+  } from './lib/data'
   import { createScene, type SceneHandle } from './lib/scene'
   import MachineDetailPanel from './lib/MachineDetailPanel.svelte'
 
@@ -14,12 +21,27 @@
 
   // Flat history in arrival order (oldest -> newest). Never re-sliced into the bottom scene
   // except on explicit navigation, so a new batch never disturbs the page you're viewing.
-  let machines = $state<Machine[]>([])
+  //
+  // DELIBERATELY NOT $state. Svelte 5's $state deep-proxies everything written into it, and at
+  // the 2,500-machine cap that is ~40,000 proxied block objects - which setMachines then reads
+  // hard (three blocks.map() passes plus a for-of per machine), paying a proxy trap on every
+  // property access, on every rebuild, on every batch. Measured on that exact read pattern:
+  // 2,000 rebuilds of 25 machines cost 39 ms plain and 1,283 ms proxied, a 33x difference.
+  // Nothing here needs deep reactivity:
+  // showPage() slices explicitly and scene.ts is imperative three.js outside Svelte entirely.
+  // The only reactive consumer is the length, which machineCount carries.
+  let machines: Machine[] = []
+  let machineCount = $state(0)
   let latestBatch = $state<Machine[]>([]) // last decoded batch, shown up top (render <=100)
   let bottomVisible = $state<Machine[]>([]) // current history page's machines, for the stepper
   let page = $state(0) // bottom page index, anchored from the OLDEST machine
   let batches = $state(0) // batches received this session (also the per-batch hash namespace)
   let selected = $state<Machine | null>(null)
+  let run = $state<Partial<RunStats>>({}) // the loop's own round row, refreshed once per round
+  // Metadata frames can in principle arrive before the geometry they describe (they are two
+  // sends, and only ordered per-connection). Anything unmatched is held here and re-applied on
+  // the next batch rather than dropped, so a race shows up as a delay, never as lost data.
+  let orphanMeta: Record<string, Training> = {}
 
   let rootEl: HTMLDivElement
   let isFullscreen = $state(false)
@@ -47,7 +69,10 @@
     splitDragging = false
   }
 
-  let url = $state('wss://localhost:8765')
+  // Plain ws:// - rlgym/stream.py serves without TLS, because the page and the training run on
+  // the same machine. A remote deployment puts a terminating proxy in front (see the
+  // integration doc) and this box takes the wss:// URL that hands you.
+  let url = $state('ws://localhost:8765')
   let status = $state<'idle' | 'connecting' | 'connected' | 'closed' | 'error'>('idle')
   let ws: WebSocket | null = null
 
@@ -73,7 +98,7 @@
     }, RETRY_MS)
   }
 
-  const totalPages = $derived(Math.max(1, Math.ceil(machines.length / PAGE)))
+  const totalPages = $derived(Math.max(1, Math.ceil(machineCount / PAGE)))
   const connected = $derived(status === 'connecting' || status === 'connected')
 
   // Shared by both viewports so selecting in one clears/syncs the other (whichever handle
@@ -120,6 +145,7 @@
     const dropPages = Math.floor((machines.length - cap) / PAGE)
     if (dropPages < 1) return
     machines.splice(0, dropPages * PAGE)
+    machineCount = machines.length
     showPage(page - dropPages)
   }
 
@@ -142,12 +168,45 @@
     }
     batches += 1
     if (!batch.length) return
+    // Apply any metadata that arrived ahead of this geometry.
+    if (Object.keys(orphanMeta).length) applyTraining(batch, orphanMeta)
     const firstEver = machines.length === 0
-    machines.push(...batch) // in-place: Svelte 5 $state array stays reactive without an O(n) copy
+    // LAG FIX 2: a loop, not `push(...batch)`. Spreading into arguments throws
+    // "RangeError: Maximum call stack size exceeded" on a large enough batch - measured in V8:
+    // fine at 100,000, throws at 200,000 - and the backlog frame a reconnect receives is
+    // exactly the one big enough to hit it. trimHistory() runs AFTER the append, so the 2,500
+    // cap never protected this. The loop form did 200,000 in 3.3 ms.
+    for (const m of batch) machines.push(m)
+    machineCount = machines.length
     trimHistory()
     latestBatch = batch.slice(-PAGE)
     topHandle?.setMachines(latestBatch, onSelect, true) // hold camera across batches
     if (firstEver) showPage(Math.ceil(machines.length / PAGE) - 1) // start bottom at newest page
+  }
+
+  // The second frame kind: training metadata and run stats, as JSON text. Matched onto machines
+  // by the candidate id the hub stamped into each binary record.
+  function onMeta(text: string) {
+    let frame: TrainingFrame
+    try {
+      frame = JSON.parse(text) as TrainingFrame
+    } catch (e) {
+      console.warn('dropped malformed metadata frame:', e)
+      return
+    }
+    if (frame.run) run = frame.run
+    const meta = frame.machines ?? {}
+    if (!Object.keys(meta).length) return
+    // Apply to the whole history, not just the last batch: on a backfill the metadata frame
+    // covers everything that just arrived, and after a page turn the older machines are the
+    // ones on screen.
+    applyTraining(machines, meta)
+    applyTraining(latestBatch, meta)
+    orphanMeta = { ...orphanMeta, ...meta }
+    // Labels are baked into the scene at build time, so a metadata frame that renamed anything
+    // needs a rebuild to show it. Cheap: <=25 machines, camera held.
+    topHandle?.setMachines(latestBatch, onSelect, true)
+    bottomHandle?.setMachines(bottomVisible, onSelect, true)
   }
 
   function connect() {
@@ -169,12 +228,18 @@
     ws.onopen = () => {
       status = 'connected'
       machines = []
+      machineCount = 0
       latestBatch = []
       bottomVisible = []
+      orphanMeta = {}
+      run = {}
       page = 0
       batches = 0
     }
-    ws.onmessage = (e) => onBatch(e.data as ArrayBuffer)
+    // One socket, two frame kinds: binary geometry and JSON metadata. `e.data` is a string for
+    // text frames and an ArrayBuffer for binary ones, which is the whole discriminator needed.
+    ws.onmessage = (e) =>
+      typeof e.data === 'string' ? onMeta(e.data) : onBatch(e.data as ArrayBuffer)
     ws.onerror = () => (status = 'error')
     ws.onclose = () => {
       status = 'closed'
@@ -300,7 +365,7 @@
     </label>
 
     <span class="text-slate-400">
-      {batches} batch{batches === 1 ? '' : 'es'} · {machines.length.toLocaleString()} machines
+      {batches} batch{batches === 1 ? '' : 'es'} · {machineCount.toLocaleString()} machines
     </span>
 
     <!-- History pager -->
@@ -346,6 +411,32 @@
     </div>
   </div>
 
+  <!-- The loop's own round row, on the page instead of only in the console. Hidden until the
+       first round reports, so a fresh connection does not show a strip full of zeros. -->
+  {#if run.round}
+    <div
+      class="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-b border-slate-800 bg-slate-900/50 px-4 py-1.5 text-[11px] text-slate-400"
+    >
+      {#snippet stat(label: string, value: string | number, tone = 'text-slate-200')}
+        <span class="whitespace-nowrap"
+          >{label} <span class="font-mono tabular-nums {tone}">{value}</span></span
+        >
+      {/snippet}
+      {@render stat('round', `${run.round} / ${run.rounds ?? '?'}`)}
+      {@render stat('functional /1k', (run.model_per_1k ?? 0).toFixed(2), 'text-emerald-300')}
+      {@render stat('control /1k', (run.control_per_1k ?? 0).toFixed(2))}
+      {@render stat('stripped', run.stripped ?? 0, 'text-amber-300')}
+      {@render stat('library', run.library ?? 0)}
+      {@render stat('attempts', (run.attempts ?? 0).toLocaleString())}
+      {@render stat('replay', (run.replay ?? 0).toLocaleString())}
+      {#if run.stopped}
+        {@render stat('stopped', run.stopped)}
+        {@render stat('depth', (run.mean_depth ?? 0).toFixed(2))}
+      {/if}
+      <span class="ml-auto whitespace-nowrap text-slate-600">round took {run.seconds ?? 0}s</span>
+    </div>
+  {/if}
+
   {#snippet stepper(list: Machine[], handle: SceneHandle | null, index: number)}
     {#if list.length}
       <div
@@ -382,7 +473,7 @@
         Latest batch · {latestBatch.length} machine{latestBatch.length === 1 ? '' : 's'}
       </span>
       {@render stepper(latestBatch, topHandle, topIndex)}
-      {#if status === 'idle' || (status !== 'connected' && !machines.length)}
+      {#if status === 'idle' || (status !== 'connected' && !machineCount)}
         <div
           class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 text-center text-sm text-slate-500"
         >

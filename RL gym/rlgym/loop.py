@@ -141,6 +141,13 @@ class Loop:
         # twice, once to price it and once to strip it, at ~6 simulator calls a time.
         self.trims: dict[str, Any] = {}
         self.transposition: dict[str, float] = {}
+        # Set by rlgym.serve. None means nothing is watching, and every publish below becomes a
+        # no-op - so `py -m rlgym.loop` behaves exactly as it did before streaming existed.
+        self.hub: Any = None
+        # Discoveries admitted this round, published as ONE batch when the round ends. The
+        # viewer's top viewport is captioned "Latest batch"; a batch per machine would make it
+        # flicker on every find while saying no more than the console already does.
+        self.pending: list[tuple[Candidate, dict]] = []
 
     # --- machines ---------------------------------------------------------------------
 
@@ -339,7 +346,7 @@ class Loop:
                 # is what the old cargo test was groping at without being able to say it.
                 if canonical_hash(trimmed) != entry.digest:
                     load_bearing += 1
-                self.store.admit(
+                admitted = self.store.admit(
                     trimmed,
                     entry.digest,
                     round_index,
@@ -348,6 +355,30 @@ class Loop:
                     redundant_removed=result.redundant_removed,
                     added_is_load_bearing=result.added_is_load_bearing,
                 )
+                # `admit` returns None for a machine already in the library, which is the right
+                # filter for the viewer too: re-sending a machine already on screen would make
+                # the history grow with duplicates.
+                if admitted is not None and self.hub is not None:
+                    self.pending.append(
+                        (
+                            trimmed,
+                            {
+                                "name": admitted.name,
+                                "digest": admitted.digest,
+                                "parent": entry.name,
+                                "generation": admitted.generation,
+                                "round_found": round_index,
+                                "source": source,
+                                "period": period,
+                                "shift": list(shift),
+                                "blocks": admitted.blocks,
+                                "redundant_removed": result.redundant_removed,
+                                "added_is_load_bearing": bool(
+                                    result.added_is_load_bearing
+                                ),
+                            },
+                        )
+                    )
             elif flies:
                 working += 1
             self.store.record(
@@ -560,6 +591,7 @@ class Loop:
                     **training,
                 )
                 self._print(row)
+                self._publish(row)
                 save_checkpoint(
                     self.out_dir / "last.pt", self.net, self.config, round_index, 0.0
                 )
@@ -627,6 +659,33 @@ class Loop:
             "mean_predicted": round(sum(p for p, _ in predictions) / len(predictions), 4),
             "mean_actual": round(sum(z for _, z in predictions) / len(predictions), 4),
         }
+
+    def _publish(self, row) -> None:
+        """One batch of this round's discoveries to whatever is watching, plus the run stats.
+
+        Sent even when the round found nothing: "nothing this round" is a result, and a stats
+        strip frozen at the last good round would misreport it as still current.
+        """
+        if self.hub is None:
+            return
+        head = row["headline"]
+        self.hub.publish(
+            self.pending,
+            run={
+                "round": row["round_index"],
+                "rounds": self.config.loop.rounds,
+                "seconds": row["seconds"],
+                "model_per_1k": head.get("model", 0.0),
+                "control_per_1k": head.get("uninformed", 0.0),
+                "stripped": head.get("redundant_stripped", 0),
+                "stopped": head.get("stopped", 0),
+                "mean_depth": head.get("mean_depth", 0.0),
+                "library": row["library"]["size"],
+                "replay": row["replay"],
+                "attempts": len(self.store.seen),
+            },
+        )
+        self.pending = []
 
     @staticmethod
     def _print(row) -> None:
