@@ -465,6 +465,15 @@ void Simulator::logPistonRetractExecuted(BlockPos pos, const Facing& facing) {
 // fire from inside setBlockState. Several of those are triggered by an unrelated write somewhere
 // else entirely, which is exactly why a reader cannot infer them and they have to be stated.
 void Simulator::logBlockDestroyed(BlockPos pos, int rawBlockId, std::uint8_t cause) {
+    if (structuralVerifyEnabled_) {
+        // unmovedBlocks_ is seeded once at candidate load and only ever cleared by the push
+        // carry-along in doPistonMove (keyed on the position a block is pushed away from). A
+        // destroy bypasses that entirely, so without this a destroyed original block's entry
+        // lingers at this position forever. If something unrelated later arrives here via a
+        // push and is pushed again, the stale entry makes that second push look like the
+        // block's first-ever displacement - it isn't, and isn't even the same block.
+        unmovedBlocks_.erase(packPos(pos));
+    }
     if (eventLog_ == nullptr) {
         return;
     }
