@@ -69,7 +69,7 @@ def test_rewards_align_with_contexts_regardless_of_which_actions_were_simulated(
         DummyContext(machine=_MACHINE, position=(2, 0, 0)),
     ]
     actions = [True, False]  # only the first gets simulated (build_candidate(False, ...) is None)
-    pool = _StubPool({1: {"validCycle": True}})
+    pool = _StubPool({1: {"shapeLocked": True}})
 
     rewards = _simulate_rewards(task, contexts, actions, pool, itertools.count(1), working_writer=None)
 
@@ -82,7 +82,7 @@ def test_a_failed_addition_is_never_recorded_as_working_or_saved(tmp_path):
     working_hashes = HashLog(tmp_path / "working_hashes.log", hash_bytes=32)
     not_working_hashes = HashLog(tmp_path / "not_working_hashes.log", hash_bytes=8)
     writer = CompactWorkingWriter(tmp_path / "compact")
-    pool = _StubPool({1: {"validCycle": False}})
+    pool = _StubPool({1: {"shapeLocked": False}})
 
     rewards = _simulate_rewards(
         task, contexts, [True], pool, itertools.count(1), writer, working_hashes, not_working_hashes
@@ -103,11 +103,11 @@ def test_rediscovering_the_same_candidate_saves_to_working_writer_only_once(tmp_
     next_id = itertools.count(1)
 
     first = _simulate_rewards(
-        task, contexts, [True], _StubPool({1: {"validCycle": True}}), next_id, writer,
+        task, contexts, [True], _StubPool({1: {"shapeLocked": True}}), next_id, writer,
         working_hashes, not_working_hashes,
     )
     second = _simulate_rewards(
-        task, contexts, [True], _StubPool({2: {"validCycle": True}}), next_id, writer,
+        task, contexts, [True], _StubPool({2: {"shapeLocked": True}}), next_id, writer,
         working_hashes, not_working_hashes,
     )
 
@@ -126,7 +126,7 @@ def test_hash_logs_record_every_simulated_outcome_in_the_matching_file():
     context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
     working_hashes = _bare_hash_log(hash_bytes=32)
     not_working_hashes = _bare_hash_log(hash_bytes=8)
-    pool = _StubPool({1: {"validCycle": True}})
+    pool = _StubPool({1: {"shapeLocked": True}})
 
     _simulate_rewards(
         task, [context], [True], pool, itertools.count(1), working_writer=None,
@@ -153,7 +153,7 @@ def test_working_cache_hit_skips_resimulation_and_recovers_the_same_reward():
         working_hashes=working_hashes, not_working_hashes=not_working_hashes,
     )
 
-    assert rewards == [1.0]  # same reward task.reward_of(True, {"validCycle": True}) would give
+    assert rewards == [1.0]  # same reward task.reward_of(True, {"shapeLocked": True}) would give
 
 
 def test_not_working_cache_hit_skips_resimulation_and_recovers_the_same_reward():
@@ -171,14 +171,14 @@ def test_not_working_cache_hit_skips_resimulation_and_recovers_the_same_reward()
         working_hashes=working_hashes, not_working_hashes=not_working_hashes,
     )
 
-    assert rewards == [-1.0]  # same reward task.reward_of(True, {"validCycle": False}) would give
+    assert rewards == [-1.0]  # same reward task.reward_of(True, {"shapeLocked": False}) would give
 
 
 def test_a_newly_discovered_working_candidate_is_published_as_one_frame():
     task = DummyTask()
     context = DummyContext(machine=_MACHINE, position=(1, 0, 0))
     hub = _StubHub()
-    pool = _StubPool({1: {"validCycle": True}})
+    pool = _StubPool({1: {"shapeLocked": True}})
 
     _simulate_rewards(
         task, [context], [True], pool, itertools.count(1), working_writer=None,
@@ -195,7 +195,7 @@ def test_failed_and_cache_hit_candidates_never_publish():
     hub = _StubHub()
 
     _simulate_rewards(
-        task, [context], [True], _StubPool({1: {"validCycle": False}}), itertools.count(1),
+        task, [context], [True], _StubPool({1: {"shapeLocked": False}}), itertools.count(1),
         working_writer=None, stream_hub=hub,
     )
     assert hub.frames == []
@@ -207,7 +207,7 @@ def test_stats_reports_simulated_count_and_collects_new_working_candidates():
         DummyContext(machine=_MACHINE, position=(1, 0, 0)),
         DummyContext(machine=_MACHINE, position=(2, 0, 0)),
     ]
-    pool = _StubPool({1: {"validCycle": True}, 2: {"validCycle": False}})
+    pool = _StubPool({1: {"shapeLocked": True}, 2: {"shapeLocked": False}})
     stats: dict = {}
 
     _simulate_rewards(
@@ -217,7 +217,7 @@ def test_stats_reports_simulated_count_and_collects_new_working_candidates():
     )
 
     assert stats["simulated"] == 2  # both actually reached pool.run_all(), neither was a cache hit
-    assert [c["id"] for c in stats["new_working"]] == [1]  # only the validCycle=True one
+    assert [c["id"] for c in stats["new_working"]] == [1]  # only the shapeLocked=True one
 
 
 def test_stats_new_working_accumulates_across_repeated_calls_on_the_same_dict():
@@ -227,11 +227,11 @@ def test_stats_new_working_accumulates_across_repeated_calls_on_the_same_dict():
     next_id = itertools.count(1)
 
     _simulate_rewards(
-        task, [context], [True], _StubPool({1: {"validCycle": True}}), next_id, working_writer=None,
+        task, [context], [True], _StubPool({1: {"shapeLocked": True}}), next_id, working_writer=None,
         working_hashes=_bare_hash_log(hash_bytes=32), stats=stats,
     )
     _simulate_rewards(
-        task, [context], [True], _StubPool({2: {"validCycle": True}}), next_id, working_writer=None,
+        task, [context], [True], _StubPool({2: {"shapeLocked": True}}), next_id, working_writer=None,
         working_hashes=_bare_hash_log(hash_bytes=32), stats=stats,
     )
 

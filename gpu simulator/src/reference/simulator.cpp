@@ -33,7 +33,7 @@ std::string Result::toJson() const {
         << ",\"z\":" << shift.z << '}'
         << ",\"cycles\":" << (cycles ? "true" : "false")
         << ",\"settled\":" << (settled ? "true" : "false")
-        << ",\"validCycle\":" << (validCycle ? "true" : "false")
+        << ",\"shapeLocked\":" << (shapeLocked ? "true" : "false")
         << ",\"finalShift\":{\"x\":" << finalShift.x
         << ",\"y\":" << finalShift.y
         << ",\"z\":" << finalShift.z << '}'
@@ -94,7 +94,7 @@ Result Simulator::simulate(const mcp1122::Candidate& candidate) {
                     }
                 }
 
-                result.validCycle = result.settled && compareFinalToInitial(candidate, result.finalShift);
+                result.shapeLocked = result.settled && compareFinalToInitial(candidate, result.finalShift);
             }
         }
     } catch (const std::exception& error) {

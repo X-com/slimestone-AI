@@ -56,7 +56,7 @@ Redundant blocks are stripped before a discovery enters the library, so waste is
 instead of thrown away.
 
 Both halves are required, and they are not equivalent: on `simple_observer_engine`, removing the
-block at (0,0,1) leaves the piston signature byte-identical while `validCycle` flips True to False
+block at (0,0,1) leaves the piston signature byte-identical while `shapeLocked` flips True to False
 and the period collapses from 10 to 2.
 
 *The original text, kept for the record:* if the modified machine has the same period, the same
@@ -85,7 +85,7 @@ cost grows only linearly with depth.
 a ceiling rather than an exact edit length. What that exposed is that the mechanism was never the
 obstacle:
 
-> A candidate's reward is `validCycle`. An episode that stops at depth 0 returns the base
+> A candidate's reward is `shapeLocked`. An episode that stops at depth 0 returns the base
 > machine, which works. So a perfect 1.0 is available for zero risk, and **doing nothing is the
 > optimal policy** under a binary reward.
 

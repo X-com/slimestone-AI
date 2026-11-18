@@ -86,7 +86,7 @@ class SimulatorPool:
                     "id": candidate.get("id"),
                     "ok": False,
                     "working": False,
-                    "validCycle": False,
+                    "shapeLocked": False,
                     "errorCode": "worker_hung" if kind == "hang" else "worker_crashed",
                     "error": str(exc),
                 }

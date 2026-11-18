@@ -59,9 +59,9 @@ def test_milestone_one_numbers(engine_candidate):
     assert 0.31 < result.success_rate < 0.33
     assert result.non_cargo_rate < 0.002
 
-    # working and validCycle are separate fields; DESIGN.md chose validCycle. On this machine
+    # working and shapeLocked are separate fields; DESIGN.md chose shapeLocked. On this machine
     # they never disagree, which is worth knowing before either is relied on alone.
-    assert result.diagnostics["working_validcycle_disagreements"] == 0
+    assert result.diagnostics["working_shapelocked_disagreements"] == 0
     # Refusals are legitimate reward-0 outcomes, not crashes: 21 modifications destroy the
     # trigger, either by overwriting it or by landing an extended piston head on it.
     assert sum(result.diagnostics["rejected_by_simulator"].values()) == 21

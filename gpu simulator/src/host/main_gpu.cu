@@ -36,7 +36,7 @@ std::string resultToJson(const GpuResult& r) {
         << ",\"shift\":{\"x\":" << r.shift.x << ",\"y\":" << r.shift.y << ",\"z\":" << r.shift.z << '}'
         << ",\"cycles\":" << (r.cycles ? "true" : "false")
         << ",\"settled\":" << (r.settled ? "true" : "false")
-        << ",\"validCycle\":" << (r.validCycle ? "true" : "false")
+        << ",\"shapeLocked\":" << (r.shapeLocked ? "true" : "false")
         << ",\"finalShift\":{\"x\":" << r.finalShift.x << ",\"y\":" << r.finalShift.y << ",\"z\":" << r.finalShift.z << '}'
         << ",\"elapsedNs\":" << 0
         << ",\"ticksPerSecond\":" << 0;
@@ -79,7 +79,7 @@ void processStream(std::istream& in, int maxTicks, int batchSize, int threadsPer
             flush();
             std::cout << "{\"id\":-1,\"ok\":false,\"working\":false,\"ticks\":0,\"start\":0,\"end\":0,"
                          "\"period\":0,\"shift\":{\"x\":0,\"y\":0,\"z\":0},\"cycles\":false,"
-                         "\"settled\":false,\"validCycle\":false,\"finalShift\":{\"x\":0,\"y\":0,\"z\":0},"
+                         "\"settled\":false,\"shapeLocked\":false,\"finalShift\":{\"x\":0,\"y\":0,\"z\":0},"
                          "\"elapsedNs\":0,\"ticksPerSecond\":0,"
                          "\"errorCode\":\"parse_error\",\"error\":\""
                       << mcp1122::quoteJson(error.what()) << "\"}\n";

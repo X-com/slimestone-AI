@@ -261,7 +261,7 @@ bool SimEventLog::selfTest() {
         log.setComponents(std::vector<ComponentRecord>{cr}, std::vector<std::uint64_t>{kA, kB});
 
         RunSummary rs;
-        rs.terminationReason = TERM_CYCLE_DETECTED; rs.validCycle = 1; rs.period = 13;
+        rs.terminationReason = TERM_CYCLE_DETECTED; rs.shapeLocked = 1; rs.period = 13;
         rs.netShift[0] = 1; rs.blockCount = 2;
         log.setSummary(rs);
 
@@ -370,7 +370,7 @@ bool SimEventLog::selfTest() {
     RunSummary rs;
     in.seekg(static_cast<std::streamoff>(footer.summaryOffset), std::ios::beg);
     in.read(reinterpret_cast<char*>(&rs), sizeof(rs));
-    ok = ok && rs.terminationReason == TERM_CYCLE_DETECTED && rs.validCycle == 1 && rs.period == 13
+    ok = ok && rs.terminationReason == TERM_CYCLE_DETECTED && rs.shapeLocked == 1 && rs.period == 13
         && rs.totalEvents == 4 && rs.distinctBlocksWithEvents == 2
         && rs.maxPushGroupSize == 13 && rs.pushLimitFailureCount == 1;
 

@@ -33,7 +33,7 @@ std::string Result::toJson() const {
         << ",\"z\":" << shift.z << '}'
         << ",\"cycles\":" << (cycles ? "true" : "false")
         << ",\"settled\":" << (settled ? "true" : "false")
-        << ",\"validCycle\":" << (validCycle ? "true" : "false")
+        << ",\"shapeLocked\":" << (shapeLocked ? "true" : "false")
         << ",\"finalShift\":{\"x\":" << finalShift.x
         << ",\"y\":" << finalShift.y
         << ",\"z\":" << finalShift.z << '}'
@@ -124,7 +124,7 @@ Result Simulator::simulate(const Candidate& candidate) {
                         }
                         result.settled = !structuralShortCircuited_ && !railLost;
                         result.finalShift = found->shift;
-                        result.validCycle = result.settled;
+                        result.shapeLocked = result.settled;
                         result.working = result.settled;
                     } else {
                         // Cycle confirmed: the trigger has done its job and burns out — it stops
@@ -141,7 +141,7 @@ Result Simulator::simulate(const Candidate& candidate) {
                             }
                         }
 
-                        result.validCycle = result.settled && compareFinalToInitial(candidate, result.finalShift);
+                        result.shapeLocked = result.settled && compareFinalToInitial(candidate, result.finalShift);
                     }
                 }
             }
@@ -154,7 +154,7 @@ Result Simulator::simulate(const Candidate& candidate) {
             RunSummary rs;
             rs.terminationReason = !triggerFired ? TERM_NOTHING_HAPPENED
                                   : (result.cycles ? TERM_CYCLE_DETECTED : TERM_TICK_BUDGET);
-            rs.validCycle = result.validCycle ? 1 : 0;
+            rs.shapeLocked = result.shapeLocked ? 1 : 0;
             rs.totalTicks = result.ticks;
             rs.period = result.period;
             rs.netShift[0] = static_cast<std::int16_t>(result.shift.x);
@@ -473,6 +473,9 @@ void Simulator::logBlockDestroyed(BlockPos pos, int rawBlockId, std::uint8_t cau
         // push and is pushed again, the stale entry makes that second push look like the
         // block's first-ever displacement - it isn't, and isn't even the same block.
         unmovedBlocks_.erase(packPos(pos));
+        // Same for a destroyed piston's cycle progress - it must not be inherited by whatever
+        // piston later lands on this position.
+        pistonCycle_.erase(packPos(pos));
     }
     if (eventLog_ == nullptr) {
         return;
@@ -1612,21 +1615,17 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
     }
 
     bool sticky = isStickyPistonBlock(blockId(state));
-    if (structuralVerifyEnabled_) {
-        // Lazily enter tracking on this piston's first-ever event (extend OR retract - a piston
-        // can start the simulation already extended in the candidate's initial state, in which
-        // case its very first event is a retract, not an extend). Must happen before either
-        // branch does anything, since Hook 3 (inside doPistonMove) needs to see this piston as
-        // already valid the moment it first pushes/pulls a block, not only after this call
-        // returns. insert() is a no-op if it's already tracked (mid-cycle already). checkForMove
-        // only ever queues a retract for a piston that IS currently extended, so simply being
-        // tracked (regardless of how it got here) is exactly "not yet spent" - no separate
-        // extended/retracted phase needs tracking.
-        validPistons_.insert(packPos(pos));
-    }
+    // shapeLocked bookkeeping (pistonCycle_): a piston's first cycle is one extend plus one
+    // retract, in either order (a piston can start extended, so its first event is a retract).
+    // Each bit is set only AFTER that action's own pushes/pulls, so Hook 3 (inside doPistonMove)
+    // judges them against the piston's state before the action. Once both bits are set the piston
+    // is finished for good - firing again never makes it valid again.
     if (id == 0) {
         if (!doPistonMove(pos, facing, true, sticky)) {
             return false;
+        }
+        if (structuralVerifyEnabled_) {
+            pistonCycle_[packPos(pos)] |= 1;
         }
         setBlockState(pos, setMetaBit(state, 3, true), 3);
     } else if (id == 1) {
@@ -1694,9 +1693,9 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
                     && (blockData(pullId).pushReaction == PushReaction::Normal
                         || pullId == BLOCK_PISTON || pullId == BLOCK_STICKY_PISTON)) {
                 // The sticky pull-back is still part of THIS retract action - Hook 3 (inside
-                // doPistonMove) must see this piston as still valid while it happens, so mark it
-                // spent only after this call, not before (see the structuralVerifyEnabled_ block
-                // below, shared by both the sticky and non-sticky paths).
+                // doPistonMove) must judge it before the retract bit is set, so that bit is set
+                // only after this call (see the structuralVerifyEnabled_ block below, shared by
+                // both the sticky and non-sticky paths).
                 doPistonMove(pos, facing, false, sticky);
                 loggedByPistonMove = true;
             }
@@ -1717,9 +1716,8 @@ bool Simulator::pistonEventReceived(BlockPos pos, std::uint32_t state, int id, i
         }
 
         if (structuralVerifyEnabled_) {
-            // A retract event only ever fires for a piston that was extended, so completing one
-            // (including the sticky pull above, if any) always means "spent" now.
-            validPistons_.erase(packPos(pos));
+            // Retract done (including the sticky pull above, if any).
+            pistonCycle_[packPos(pos)] |= 2;
         }
     }
     return true;
@@ -1878,17 +1876,26 @@ bool Simulator::doPistonMove(BlockPos pos, const Facing& direction, bool extendi
             std::uint64_t sourceKey = packPos(source);
             // A tracked piston being carried along by this push — same idea as the triggerPos_
             // sync above, generalized to every piston, not just the trigger.
-            if (validPistons_.erase(sourceKey) > 0) {
-                validPistons_.insert(packPos(target));
+            auto cycleIt = pistonCycle_.find(sourceKey);
+            if (cycleIt != pistonCycle_.end()) {
+                std::uint8_t progress = cycleIt->second;
+                pistonCycle_.erase(cycleIt);
+                pistonCycle_[packPos(target)] = progress;
             }
             // First-ever displacement of this original block - only valid if the acting piston
-            // (pos/direction of this doPistonMove call) hasn't already completed a cycle of its
-            // own; otherwise a spent piston is pushing a never-before-moved block.
+            // (pos of this doPistonMove call) hasn't finished its first cycle (extended AND
+            // retracted). A finished piston moving a never-before-moved block means that block
+            // joined the machine mid-flight: the shape is not locked.
             auto blockIt = unmovedBlocks_.find(sourceKey);
             if (blockIt != unmovedBlocks_.end()) {
                 unmovedBlocks_.erase(blockIt);
-                if (validPistons_.find(packPos(pos)) == validPistons_.end()) {
+                auto actorIt = pistonCycle_.find(packPos(pos));
+                if (actorIt != pistonCycle_.end() && actorIt->second == 3) {
                     structuralShortCircuited_ = true;
+                    if (trace_ != nullptr) {
+                        // sv.late: block at `source` joined late, moved by the finished piston at pos.
+                        trace_->log(world_, "sv.late", &source, pos.x * 1000 + pos.z, pos.y);
+                    }
                 }
             }
         }
@@ -2711,7 +2718,7 @@ void Simulator::loadCandidate(const Candidate& candidate) {
     triggerCharged_ = false;
     triggerEndTick_ = -1;
     triggerDisabled_ = false;
-    validPistons_.clear();
+    pistonCycle_.clear();
     unmovedBlocks_.clear();
     structuralShortCircuited_ = false;
     originalIdOf_.clear();
@@ -2744,10 +2751,9 @@ void Simulator::loadCandidate(const Candidate& candidate) {
         if (isNcPowerSource(id, e.state)) ncPowerSet_.insert(e.key);
         // Structural verification (see Simulator::simulate) - harmless to seed unconditionally
         // even when the mode is off, since nothing else reads these sets in that case.
-        // validPistons_ is NOT pre-seeded here - a piston only enters it the first time it
-        // actually extends (see pistonEventReceived's id==0 branch), so a piston that's part of
-        // the structure but never fires during the observed cycle (cargo, decorative, unrelated
-        // mechanism) never counts against validity.
+        // pistonCycle_ is NOT pre-seeded here - a piston only gets an entry once it completes an
+        // extend or retract (see pistonEventReceived), so a piston that never fires is never
+        // "finished" and never counts against shapeLocked.
         unmovedBlocks_.insert(e.key);
         // simulation_data: every original block gets a tracked identity + index slot up front.
         if (eventLog_ != nullptr) {

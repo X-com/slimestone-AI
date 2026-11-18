@@ -28,8 +28,8 @@ if errorlevel 1 (
 REM The CUDA kernel's file mode only reads the compact format (see
 REM genetic_ml/compact_format.py) - convert the JSON cycle-test fixtures fresh on every run
 REM rather than requiring a stale hand-maintained compact copy. Same fixtures
-REM cpp simulator/run-cycle-test.bat verifies validCycle against - simple_valid_cycle should come
-REM back "validCycle":true, simple_not_valid_cycle should come back "validCycle":false.
+REM cpp simulator/run-cycle-test.bat verifies shapeLocked against - simple_shape_locked should come
+REM back "shapeLocked":true, simple_not_shape_locked should come back "shapeLocked":false.
 pushd "%GENETIC_ML%"
 py convert_fixtures_to_compact.py "%INPUT_DIR%" "%COMPACT_DIR%"
 set "CONVERT_ERR=%ERRORLEVEL%"

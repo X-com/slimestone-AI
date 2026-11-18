@@ -71,7 +71,7 @@ struct GpuResult {
     BlockPos shift;
     bool cycles = false;
     bool settled = false;
-    bool validCycle = false;
+    bool shapeLocked = false;
     BlockPos finalShift;
     GpuErrorCode errorCode = GpuErrorCode::None;
 };
@@ -194,7 +194,7 @@ public:
                     }
                 }
 
-                result.validCycle = result.settled && compareFinalToInitial(candidate, result.finalShift);
+                result.shapeLocked = result.settled && compareFinalToInitial(candidate, result.finalShift);
             }
         }
         return result;

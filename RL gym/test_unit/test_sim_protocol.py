@@ -26,7 +26,7 @@ def _verdict_core(result: dict) -> tuple:
     return (
         result.get("ok"),
         result.get("working"),
-        result.get("validCycle"),
+        result.get("shapeLocked"),
         result.get("period"),
         result.get("ticks"),
         result.get("start"),
@@ -42,7 +42,7 @@ def test_base_machine_has_the_expected_cycle(engine):
     with SimulatorProcess() as proc:
         result = proc.simulate(engine.to_candidate(cid=0))
     assert result["ok"] is True
-    assert result["validCycle"] is True
+    assert result["shapeLocked"] is True
     assert result["period"] == 10
     assert result["finalShift"] == {"x": 1, "y": 0, "z": 0}
 
@@ -131,7 +131,7 @@ def test_destroying_the_trigger_is_rejected_not_crashed(engine):
         result = proc.simulate(candidate)
     assert result["ok"] is False
     assert "trigger" in result.get("error", "")
-    assert not result.get("validCycle")
+    assert not result.get("shapeLocked")
 
 
 def test_extended_piston_head_lands_where_facing_says(engine):

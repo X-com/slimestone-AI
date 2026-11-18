@@ -5,7 +5,7 @@ line per candidate to stdout (main.cpp:57 processStream). This module owns that 
 
 The verdict already carries everything Milestone 1 needs, so no sim-log decoding is involved:
 
-    validCycle              the reward
+    shapeLocked              the reward
     period, shift           the cheap half of the cargo detector
     elapsedNs               per-candidate timing, which measures the ~1ms assumption directly
 
@@ -292,4 +292,4 @@ def simulate_all(
 def iter_verdicts(results: Iterable[dict[str, Any]]) -> Iterable[tuple[int, float]]:
     """(id, reward) pairs. Reward is a float from the start - see game.py."""
     for result in results:
-        yield result["id"], 1.0 if result.get("validCycle") else 0.0
+        yield result["id"], 1.0 if result.get("shapeLocked") else 0.0

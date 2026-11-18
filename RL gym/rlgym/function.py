@@ -26,10 +26,10 @@ consulted.
 
 **The machine must also still work, and that is not implied by the signature.** Measured on
 `simple_observer_engine`: removing the block at (0,0,1) leaves the piston signature byte-identical
-while `validCycle` flips True -> False and the period collapses from 10 to 2. Testing the pistons
+while `shapeLocked` flips True -> False and the period collapses from 10 to 2. Testing the pistons
 alone would delete load-bearing blocks and admit broken machines to the library. So redundancy is
 "removable **and the same flying machine still works**", which is the whole of the stated
-requirement rather than half of it. `Summary.valid_cycle` is already in every record, so this
+requirement rather than half of it. `Summary.shape_locked` is already in every record, so this
 costs no extra simulator call.
 
 **The unit of work is the push group.** The added block is only the trigger. If a modification
@@ -98,7 +98,7 @@ def unchanged(record: Record | None, signature: tuple[PistonOp, ...]) -> bool:
     """
     if record is None:
         return False  # the simulator refused it outright: maximal disturbance
-    if not record.summary.valid_cycle:
+    if not record.summary.shape_locked:
         return False
     return piston_signature(record) == signature
 
@@ -250,7 +250,7 @@ def trim(
     if candidate_record is None:
         return Trim(cells, [], True, 0, calls)
 
-    if not candidate_record.summary.valid_cycle:
+    if not candidate_record.summary.shape_locked:
         return Trim(cells, [], True, 0, calls)  # not a working discovery; nothing to trim
 
     signature = piston_signature(candidate_record)

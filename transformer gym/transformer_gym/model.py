@@ -143,7 +143,7 @@ class PhysicsTransformer(nn.Module):
             moves=self.moves_head(x).squeeze(-1),
             stays_attached=self.stays_head(x).squeeze(-1),
             event_grid=self.event_grid_head(x),
-            valid_cycle=self.valid_cycle_head(pooled).squeeze(-1),
+            shape_locked=self.valid_cycle_head(pooled).squeeze(-1),
             termination=self.termination_head(pooled),
             net_shift=self.net_shift_head(pooled),
         )

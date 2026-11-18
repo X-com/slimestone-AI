@@ -146,7 +146,7 @@ def label_k1(
     all_results = simulate_all([base_candidate, *to_run], workers=workers, config=config)
     wall = time.perf_counter() - started
     base_result, results = all_results[0], all_results[1:]
-    if not base_result.get("validCycle"):
+    if not base_result.get("shapeLocked"):
         raise ValueError(
             f"Base machine {name} does not itself have a valid cycle "
             f"(errorCode={base_result.get('errorCode')!r}). Every label would be measured "
@@ -180,7 +180,7 @@ def label_k1(
             # when the modification overwrites the trigger cell or lands an extended piston
             # head on it. Counted separately so a genuine crash cannot hide among them.
             rejected[str(result.get("error", result.get("errorCode", "unknown")))[:60]] += 1
-        reward = 1.0 if result.get("validCycle") else 0.0
+        reward = 1.0 if result.get("shapeLocked") else 0.0
         period = int(result.get("period", 0))
         shift = result.get("finalShift") or {"x": 0, "y": 0, "z": 0}
         shift_t = (shift["x"], shift["y"], shift["z"])
@@ -205,7 +205,7 @@ def label_k1(
             cargo += int(is_cargo)
             periods[period] += 1
             shifts[shift_t] += 1
-        if bool(result.get("working")) != bool(result.get("validCycle")):
+        if bool(result.get("working")) != bool(result.get("shapeLocked")):
             disagreements += 1
         if duplicate_of is None:
             elapsed_ns += int(result.get("elapsedNs", 0))
@@ -233,7 +233,7 @@ def label_k1(
             # its sum once workers > 1 - the sum counts every worker's time while the clock
             # counts one - so overhead is deliberately not derived by subtracting them.
             "mean_elapsed_ms": round(elapsed_ns / 1e6 / max(1, len(to_run)), 4),
-            "working_validcycle_disagreements": disagreements,
+            "working_shapelocked_disagreements": disagreements,
             "rejected_by_simulator": dict(rejected.most_common(5)),
             "simulate_failures": dict(failures),
             "working_periods": dict(periods.most_common(10)),
@@ -259,7 +259,7 @@ def _report(result: LabelSet) -> str:
         "",
         f"wall time              {d['wall_seconds']}s   ({d['sims_per_second']} sims/sec)",
         f"mean elapsedNs         {d['mean_elapsed_ms']} ms per candidate (C++ side timer)",
-        f"working != validCycle  {d['working_validcycle_disagreements']}",
+        f"working != shapeLocked  {d['working_shapelocked_disagreements']}",
         f"rejected by simulator  {d['rejected_by_simulator'] or 'none'}",
         f"simulate failures      {d['simulate_failures'] or 'none'}",
         f"periods of workers     {d['working_periods']}",
@@ -518,7 +518,7 @@ def label_k2(
         pairs = pairs[:limit]
 
     base = simulate_all([machine.to_candidate(cid=-1)], workers=workers, config=config)[0]
-    if not base.get("validCycle"):
+    if not base.get("shapeLocked"):
         raise ValueError(
             f"Base machine {name} has no valid cycle; every label would be measured against a "
             "broken reference."
@@ -542,7 +542,7 @@ def label_k2(
             return
         for result in simulate_all(pending, workers=workers, config=config):
             digest = hashes[result["id"]]
-            if not result.get("validCycle"):
+            if not result.get("shapeLocked"):
                 continue
             working.add(digest)
             period = int(result.get("period", 0))

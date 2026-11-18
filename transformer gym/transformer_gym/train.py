@@ -74,7 +74,7 @@ def _per_sample_losses(out: dict, batch: dict) -> dict[str, torch.Tensor]:
     grid_loss = (grid_loss * mask.unsqueeze(-1)).sum(dim=(-2, -1)) / (node_count * k)
 
     structure_loss = (
-        nn.functional.binary_cross_entropy_with_logits(out["valid_cycle"], batch["y_valid_cycle"], reduction="none")
+        nn.functional.binary_cross_entropy_with_logits(out["shape_locked"], batch["y_shape_locked"], reduction="none")
         + nn.functional.cross_entropy(out["termination"], batch["y_termination"], reduction="none")
         + nn.functional.mse_loss(out["net_shift"], batch["y_net_shift"], reduction="none").mean(dim=-1)
     )

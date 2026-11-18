@@ -33,7 +33,7 @@ class _StubPool:
         return None
 
     def run_all(self, candidates: list[dict]) -> list[dict]:
-        return [{"validCycle": self.working} for _ in candidates]
+        return [{"shapeLocked": self.working} for _ in candidates]
 
 
 class _StubHub:

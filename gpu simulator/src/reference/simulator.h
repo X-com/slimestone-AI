@@ -41,7 +41,7 @@ struct Result {
     BlockPos shift;
     bool cycles = false;
     bool settled = false;
-    bool validCycle = false;
+    bool shapeLocked = false;
     BlockPos finalShift;
     std::int64_t elapsedNs = 0;
     std::string errorCode;

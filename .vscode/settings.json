@@ -4,5 +4,6 @@
     "python.defaultInterpreterPath": "D:\\ProgramFiles\\Python313\\python.exe",
     "code-runner.executorMap": {
         "python": "\"D:\\ProgramFiles\\Python313\\python.exe\" -u"
-    }
+    },
+    "cmake.sourceDirectory": "D:/Programmering/GitKraken/slimestone-AI/cpp simulator"
 }

@@ -190,13 +190,13 @@ class ComponentRecord:
 
 
 class RunSummary:
-    __slots__ = ("terminationReason", "validCycle", "travelAxis", "totalTicks", "period",
+    __slots__ = ("terminationReason", "shapeLocked", "travelAxis", "totalTicks", "period",
                  "netShift", "bboxMin", "bboxMax", "triggerPos", "totalEvents",
                  "distinctBlocksWithEvents", "maxObserverChainDepth", "maxPushGroupSize",
                  "pushLimitFailureCount", "blockCount")
 
     def __init__(self, raw: tuple):
-        (self.terminationReason, self.validCycle, self.travelAxis, _pad, self.totalTicks,
+        (self.terminationReason, self.shapeLocked, self.travelAxis, _pad, self.totalTicks,
          self.period, sx, sy, sz, minx, miny, minz, maxx, maxy, maxz, tx, ty, tz,
          self.totalEvents, self.distinctBlocksWithEvents, self.maxObserverChainDepth,
          self.maxPushGroupSize, self.pushLimitFailureCount, self.blockCount, _r) = raw
@@ -418,7 +418,7 @@ def dump_log(path: Path) -> int:
 
     summary = read_summary(data, footer)
     print(f"-- RunSummary: {TERMINATION_NAMES.get(summary.terminationReason, summary.terminationReason)} "
-          f"validCycle={bool(summary.validCycle)} ticks={summary.totalTicks} period={summary.period} "
+          f"shapeLocked={bool(summary.shapeLocked)} ticks={summary.totalTicks} period={summary.period} "
           f"netShift={summary.netShift} maxPushGroupSize={summary.maxPushGroupSize} "
           f"pushLimitFailures={summary.pushLimitFailureCount} --")
 
@@ -561,7 +561,7 @@ def _self_check() -> None:
     assert len(components) == 1 and components[0].memberCount == 2
 
     summary = read_summary(data, f)
-    assert summary.terminationReason == 0 and summary.validCycle == 1 and summary.period == 13
+    assert summary.terminationReason == 0 and summary.shapeLocked == 1 and summary.period == 13
 
     would_power = read_would_power(data, f)
     assert len(would_power) == 1 and would_power[0].sourceKey == kA and would_power[0].pistonKey == kB

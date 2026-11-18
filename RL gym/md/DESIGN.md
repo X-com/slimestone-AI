@@ -14,7 +14,7 @@ possible moves covers all three, and one model output covers them without specia
 
 ## Validity
 
-**`validCycle` from the simulator footer. That is the only definition of failure.**
+**`shapeLocked` from the simulator footer. That is the only definition of failure.**
 
 A machine is valid if its configuration after one period equals its start translated by `cycleShift`.
 Blocks may be destroyed or replaced mid-cycle — only the cycle endpoints matter.
@@ -61,7 +61,7 @@ wrong in the old design was the task it pointed at, not the representation.
 
 ## What it predicts (phase one)
 
-**The richer target**: what changes, where the first failure appears, and whether `validCycle` holds
+**The richer target**: what changes, where the first failure appears, and whether `shapeLocked` holds
 — not just a yes/no.
 
 Every simulation produces a full log either way, so reducing it to one bit throws away what was

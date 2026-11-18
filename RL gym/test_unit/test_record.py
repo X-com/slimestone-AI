@@ -67,7 +67,7 @@ def test_summary_agrees_with_the_stdout_verdict(engine):
     with SimulatorProcess() as proc:
         verdict = proc.simulate(engine.to_candidate(cid=0))
 
-    assert bool(record.summary.valid_cycle) == verdict["validCycle"]
+    assert bool(record.summary.shape_locked) == verdict["shapeLocked"]
     assert record.summary.period == verdict["period"]
     assert record.summary.net_shift == (
         verdict["finalShift"]["x"],

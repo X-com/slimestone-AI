@@ -141,7 +141,7 @@ def test_signature_alone_is_not_enough(engine_base):
     """The measurement that changed the definition.
 
     Removing (0,0,1) from `simple_observer_engine` leaves the piston signature **byte-identical**
-    while `validCycle` flips True -> False and the period collapses from 10 to 2. A redundancy
+    while `shapeLocked` flips True -> False and the period collapses from 10 to 2. A redundancy
     test on pistons alone would delete a load-bearing block and admit a broken machine.
     """
     from rlgym.simlog import record_for
@@ -152,8 +152,8 @@ def test_signature_alone_is_not_enough(engine_base):
     record = record_for(machine.to_candidate(without, cid=0))
 
     assert piston_signature(record) == signature, "the premise of this test has changed"
-    assert not record.summary.valid_cycle
-    assert not unchanged(record, signature), "validCycle is not being required"
+    assert not record.summary.shape_locked
+    assert not unchanged(record, signature), "shapeLocked is not being required"
 
 
 @pytest.mark.slow
@@ -187,7 +187,7 @@ def test_trimming_never_returns_an_unverified_machine(engine_base):
 
     before = piston_signature(record_for(machine.to_candidate(cells, cid=0)))
     after = record_for(machine.to_candidate(result.cells, cid=0))
-    assert after.summary.valid_cycle
+    assert after.summary.shape_locked
     assert piston_signature(after) == before
 
 

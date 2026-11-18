@@ -55,7 +55,7 @@ def test_no_op_placement_gives_an_identical_verdict(engine):
         return (
             result["ok"],
             result["working"],
-            result["validCycle"],
+            result["shapeLocked"],
             result["period"],
             result["ticks"],
             tuple(sorted(result["finalShift"].items())),
@@ -81,6 +81,6 @@ def test_initial_state_we_send_is_what_the_simulator_receives(engine):
     with SimulatorProcess() as proc:
         a = proc.simulate(original)
         b = proc.simulate({**decoded, "id": 1})
-    assert a["validCycle"] == b["validCycle"]
+    assert a["shapeLocked"] == b["shapeLocked"]
     assert a["period"] == b["period"]
     assert a["finalShift"] == b["finalShift"]

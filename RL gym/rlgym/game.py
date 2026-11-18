@@ -6,7 +6,7 @@ Five things and nothing else, because MCTS calls nothing else:
     actions     (cell, palette entry), plus a reserved masked stop
     transition  write the placement into the set - deterministic, free, no simulator call
     terminal    len(placements) == k
-    reward      build, hash, simulate if new, validCycle as a float
+    reward      build, hash, simulate if new, shapeLocked as a float
 
 The reward is deliberately a float everywhere and never a bool: it becomes a graded 0-1 value
 later by means not yet decided, and keeping the type right now makes that change free.

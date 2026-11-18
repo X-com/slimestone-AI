@@ -33,7 +33,7 @@ def _report(name: str, model: torch.nn.Module, batch: dict) -> None:
     print(f"event_grid accuracy:     {_binary_accuracy(out['event_grid'], batch['y_event_grid'], grid_mask):.3f}")
     term_correct = (out["termination"].argmax(-1) == batch["y_termination"]).float().mean().item()
     print(f"termination accuracy:    {term_correct:.3f}")
-    print(f"valid_cycle accuracy:    {((out['valid_cycle'] > 0).float() == batch['y_valid_cycle']).float().mean().item():.3f}")
+    print(f"shape_locked accuracy:    {((out['shape_locked'] > 0).float() == batch['y_shape_locked']).float().mean().item():.3f}")
     print(f"net_shift MAE:           {(out['net_shift'] - batch['y_net_shift']).abs().mean().item():.3f}")
 
 

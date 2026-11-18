@@ -307,7 +307,7 @@ struct ComponentRecord {
 // fields (totalEvents, distinctBlocksWithEvents, maxPushGroupSize, pushLimitFailureCount).
 struct RunSummary {
     std::uint8_t  terminationReason = TERM_INTERNAL_ERROR;
-    std::uint8_t  validCycle = 0;
+    std::uint8_t  shapeLocked = 0;
     std::int8_t   travelAxis = -1;     // 0=x 1=y 2=z, -1 unknown
     std::uint8_t  pad = 0;
     std::int32_t  totalTicks = 0;

@@ -105,7 +105,7 @@ the seed pool the next time `main.py` or `main_ga.py` runs.
 ## Genetic Algorithm
 
 `main_ga.py` runs a mutation-only genetic search for new working flying machines.
-Fitness is the simulator's boolean `validCycle` field only - there is no other signal. (`validCycle`
+Fitness is the simulator's boolean `shapeLocked` field only - there is no other signal. (`shapeLocked`
 is the ground-truth check: does the machine settle and end up an exact translated copy of its
 starting layout - not the older `working`/`cycles` hash-based cycle detector, which can report a
 repeat was detected without the final layout actually lining up.)

@@ -95,7 +95,7 @@ def measure(
     def oracle(candidate) -> float:
         nonlocal calls
         calls += 1
-        return 1.0 if sim.simulate(candidate).get("validCycle") else 0.0
+        return 1.0 if sim.simulate(candidate).get("shapeLocked") else 0.0
 
     graph = graph_for(machine, truth.machine, cache_dir=config.graphs_dir, tick_cap=config.tick_cap)
     rng = random.Random(seed)

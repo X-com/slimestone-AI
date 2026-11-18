@@ -149,7 +149,7 @@ class InitialBlock:
 @dataclass(frozen=True)
 class Summary:
     termination_reason: int
-    valid_cycle: int
+    shape_locked: int
     travel_axis: int
     total_ticks: int
     period: int
@@ -253,7 +253,7 @@ def read_initial_state(data: bytes, footer: dict[str, Any]) -> list[InitialBlock
 def read_summary(data: bytes, footer: dict[str, Any]) -> Summary:
     f = _SUMMARY.unpack_from(data, footer["summaryOffset"])
     return Summary(
-        termination_reason=f[0], valid_cycle=f[1], travel_axis=f[2],
+        termination_reason=f[0], shape_locked=f[1], travel_axis=f[2],
         total_ticks=f[4], period=f[5],
         net_shift=(f[6], f[7], f[8]),
         bbox_min=(f[9], f[10], f[11]), bbox_max=(f[12], f[13], f[14]),

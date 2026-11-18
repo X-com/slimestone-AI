@@ -69,10 +69,10 @@ def _simulate_rewards(
             continue
         candidate_hash = canonical_hash(candidate)
         if working_hashes is not None and working_hashes.has(candidate_hash):
-            cache_hit_rewards[i] = task.reward_of(actions[i], {"validCycle": True})
+            cache_hit_rewards[i] = task.reward_of(actions[i], {"shapeLocked": True})
             continue
         if not_working_hashes is not None and not_working_hashes.has(candidate_hash):
-            cache_hit_rewards[i] = task.reward_of(actions[i], {"validCycle": False})
+            cache_hit_rewards[i] = task.reward_of(actions[i], {"shapeLocked": False})
             continue
         to_simulate.append((i, candidate, candidate_hash))
 
@@ -86,7 +86,7 @@ def _simulate_rewards(
     new_working: list[Candidate] = []
     for (i, candidate, candidate_hash), result in zip(to_simulate, results):
         rewards[i] = task.reward_of(actions[i], result)
-        working = result.get("validCycle") is True
+        working = result.get("shapeLocked") is True
         if working:
             if working_hashes is not None:
                 newly_discovered = working_hashes.record(candidate_hash)

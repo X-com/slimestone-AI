@@ -59,7 +59,7 @@ than a noisy sample of one game, which makes value learning far easier here than
 | **actions** | `(cell, palette entry)` over candidate cells, plus a reserved masked `stop` |
 | **transition** | write the placement into the set. Deterministic, free, **no simulator call** |
 | **terminal** | `len(placements) == k`, a fixed constant |
-| **reward** | build -> `canonical_hash` -> simulate if new -> `validCycle` as a **float** |
+| **reward** | build -> `canonical_hash` -> simulate if new -> `shapeLocked` as a **float** |
 
 ## One episode, traced
 
@@ -73,7 +73,7 @@ s1 = (engine, {(1,1,1): sticky_piston/west})
      ~1,211 legal actions
      a1 = slime at cell (0,1,2)
 s2 = terminal — k reached
-     -> build, hash, simulate -> validCycle = true -> reward 1.0
+     -> build, hash, simulate -> shapeLocked = true -> reward 1.0
 ```
 
 MCTS calls nothing but those five things. Swapping the reward from binary to graded later touches the
@@ -928,7 +928,7 @@ Exhaustive search over unordered k-block modifications at ~1,000 sims/sec, R=1:
 
 ### Stage 0 — network only, no search
 Brute-force every single-block modification. Train `f` supervised: `pi` <- exact distribution over
-working moves; `z` <- exact `validCycle`; `B`, `D` <- from the record. A **perfect** policy-improvement
+working moves; `z` <- exact `shapeLocked`; `B`, `D` <- from the record. A **perfect** policy-improvement
 operator. Verifies encoder, heads, loss balance and data path before any search code exists.
 *Gate:* `v` calibrated (point 33), `p` beating a uniform prior on a held-out machine.
 
@@ -948,7 +948,7 @@ load-bearing: in stages 0-1 only `v`'s *ranking* mattered; now its *value* is ba
 
 | field | gives us |
 |---|---|
-| **`validCycle`** | **the reward, directly** |
+| **`shapeLocked`** | **the reward, directly** |
 | `period`, `shift`, `finalShift` | **the cheap half of the cargo detector, free** |
 | `elapsedNs` | per-candidate timing — measures the "~1 ms" assumption directly |
 | `working`, `cycles`, `settled`, `ticks` | diagnostics |
@@ -1015,7 +1015,7 @@ period. One such modification exists in the entire single-block space.
 | `elapsedNs` per candidate | **0.26 ms** on the base machine, ~4x faster than the 1 ms assumption |
 | throughput | **572 sims/sec** at 12 workers (after fixing a chunking bug — see `VERIFICATION.md`) |
 | `canonical_hash` duplicates | **0** across all 988 — no single-block action reaches another one's machine |
-| `working` vs `validCycle` disagreements | **0** — they never differ on this machine |
+| `working` vs `shapeLocked` disagreements | **0** — they never differ on this machine |
 | simulator refusals | **21**, all *"structural-verify trigger must point at an observer or a piston"* |
 
 The 21 refusals are a clean end-to-end confirmation of the compound extended-piston action: nine

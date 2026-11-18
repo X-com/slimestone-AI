@@ -52,9 +52,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  $r = $lines[$i] | ConvertFrom-Json; " ^
   "  $expectCycle = $name -notmatch 'doesnt_loop|not_valid'; " ^
   "  if (-not $r.ok) { $status = 'ERROR'; $fail++ } " ^
-  "  elseif ([bool]$r.validCycle -eq $expectCycle) { $status = 'PASS' } " ^
+  "  elseif ([bool]$r.shapeLocked -eq $expectCycle) { $status = 'PASS' } " ^
   "  else { $status = 'FAIL'; $fail++ }; " ^
-  "  '{0,-45} expect={1,-5} validCycle={2,-5} {3}' -f $name, $expectCycle, [bool]$r.validCycle, $status; " ^
+  "  '{0,-45} expect={1,-5} shapeLocked={2,-5} {3}' -f $name, $expectCycle, [bool]$r.shapeLocked, $status; " ^
   "}; " ^
   "if ($fail -gt 0) { Write-Host \"$fail of $($files.Count) fixture(s) did not match their name's expected cycle behavior\" -ForegroundColor Red } " ^
   "else { Write-Host \"all $($files.Count) fixture(s) matched their name's expected cycle behavior\" -ForegroundColor Green }; " ^

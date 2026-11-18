@@ -27,7 +27,7 @@ struct Result {
     BlockPos shift;
     bool cycles = false;
     bool settled = false;
-    bool validCycle = false;
+    bool shapeLocked = false;
     BlockPos finalShift;
     std::int64_t elapsedNs = 0;
     std::string errorCode;
@@ -133,7 +133,9 @@ private:
     // toggled by MCP1122_CPP_STRUCTURAL_VERIFY (see Simulator::simulate). Only touched/consulted
     // when structuralVerifyEnabled_ is true.
     bool structuralVerifyEnabled_ = false;
-    std::unordered_set<std::uint64_t> validPistons_;  // positions of pistons not yet "spent"
+    // Per-piston first-cycle progress, keyed on the piston's live position: bit 1 = has extended,
+    // bit 2 = has retracted. A piston is "finished" once both are set (== 3), in either order.
+    std::unordered_map<std::uint64_t, std::uint8_t> pistonCycle_;
     std::unordered_set<std::uint64_t> unmovedBlocks_;  // original blocks never yet displaced
     bool structuralShortCircuited_ = false;
     // Rail block count right after the candidate is placed. A rail losing support mid-move

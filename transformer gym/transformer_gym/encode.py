@@ -95,7 +95,7 @@ class Sample:
     y_stays_attached: torch.Tensor  # [N] float in {0,1}: preserved offset within its t=0 component
     y_event_grid: torch.Tensor    # [N, N_KINDS] float in {0,1}
     y_net_shift: torch.Tensor     # [3] float
-    y_valid_cycle: torch.Tensor   # [] float in {0,1}
+    y_shape_locked: torch.Tensor   # [] float in {0,1}
     y_termination: torch.Tensor   # [] long
 
 
@@ -262,7 +262,7 @@ def encode(log_path: Path, max_nodes: int = 300) -> Sample:
             y_stays_attached[key_to_idx[key]] = float(orig_off == final_off)
 
     y_net_shift = torch.tensor(summary.netShift, dtype=torch.float32)
-    y_valid_cycle = torch.tensor(float(summary.validCycle))
+    y_shape_locked = torch.tensor(float(summary.shapeLocked))
     y_termination = torch.tensor(summary.terminationReason, dtype=torch.long)
 
     return Sample(
@@ -270,5 +270,5 @@ def encode(log_path: Path, max_nodes: int = 300) -> Sample:
         movability=graph.movability, stickiness=graph.stickiness, is_trigger=graph.is_trigger,
         is_air=graph.is_air, rel_pos=graph.rel_pos, rel_edges=graph.rel_edges,
         y_moves=y_moves, y_stays_attached=y_stays_attached, y_event_grid=y_event_grid,
-        y_net_shift=y_net_shift, y_valid_cycle=y_valid_cycle, y_termination=y_termination,
+        y_net_shift=y_net_shift, y_shape_locked=y_shape_locked, y_termination=y_termination,
     )

@@ -159,7 +159,7 @@ class Loop:
                 continue
             candidate = machine.to_candidate(cid=0)
             verdict = sim.simulate(candidate)
-            if not verdict.get("validCycle"):
+            if not verdict.get("shapeLocked"):
                 continue
             shift = verdict.get("finalShift") or {"x": 0, "y": 0, "z": 0}
             entry = self.store.seed(
@@ -234,7 +234,7 @@ class Loop:
             verdict = sim.simulate(candidate)
             digest = canonical_hash(candidate)
             self.verdicts[digest] = verdict
-            if not verdict.get("validCycle"):
+            if not verdict.get("shapeLocked"):
                 return 0.0
             if weight <= 0.0 or base_record is None:
                 return 1.0
@@ -326,7 +326,7 @@ class Loop:
             # with "does not fly" - measured on the first graded run, where 12 of 19 flying
             # machines were logged as failures and never reached the library. The reward is a
             # training signal; the verdict is the fact.
-            flies = bool(verdict.get("validCycle"))
+            flies = bool(verdict.get("shapeLocked"))
             result = None
             if flies and base_record is not None:
                 working += 1

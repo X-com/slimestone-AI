@@ -106,7 +106,7 @@ def collate(samples: list[Sample]) -> dict:
     y_stays_attached = torch.zeros(b, n_max)
     y_event_grid = torch.zeros(b, n_max, N_KINDS)
     y_net_shift = torch.zeros(b, 3)
-    y_valid_cycle = torch.zeros(b)
+    y_shape_locked = torch.zeros(b)
     y_termination = torch.zeros(b, dtype=torch.long)
     edge_chunks = []
 
@@ -125,7 +125,7 @@ def collate(samples: list[Sample]) -> dict:
         y_stays_attached[i, :n] = s.y_stays_attached
         y_event_grid[i, :n] = s.y_event_grid
         y_net_shift[i] = s.y_net_shift
-        y_valid_cycle[i] = s.y_valid_cycle
+        y_shape_locked[i] = s.y_shape_locked
         y_termination[i] = s.y_termination
 
         offset = i * n_max
@@ -139,7 +139,7 @@ def collate(samples: list[Sample]) -> dict:
         movability=movability, stickiness=stickiness, is_trigger=is_trigger, is_air=is_air,
         rel_pos=rel_pos, rel_edges=rel_edges, mask=mask, y_moves=y_moves,
         y_stays_attached=y_stays_attached, y_event_grid=y_event_grid, y_net_shift=y_net_shift,
-        y_valid_cycle=y_valid_cycle, y_termination=y_termination,
+        y_shape_locked=y_shape_locked, y_termination=y_termination,
     )
 
 

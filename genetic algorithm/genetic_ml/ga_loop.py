@@ -213,11 +213,11 @@ def run_ga(
                 new_working: list[Candidate] = []
                 with _timed(section_seconds, "postprocess"):
                     for (child, source_kind, source_hash, child_hash), result in zip(offspring, results, strict=True):
-                        # validCycle (not the older working/cycles hash-based heuristic) is the
+                        # shapeLocked (not the older working/cycles hash-based heuristic) is the
                         # simulator's ground-truth check: does the machine settle and end up an
                         # exact translated copy of its starting layout, not just "a repeat was
                         # detected."
-                        working = result.get("validCycle") is True
+                        working = result.get("shapeLocked") is True
                         if working:
                             lineage = Lineage(
                                 candidate=child,

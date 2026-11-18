@@ -334,7 +334,7 @@ either against `configs/stage1.json` and compare the `round` rows.
 may end short of - and that is the whole of what "let the model decide how many blocks to place"
 needs, mechanically.
 
-**Mechanically. The reward is the problem.** A candidate's reward is `validCycle`, and an episode
+**Mechanically. The reward is the problem.** A candidate's reward is `shapeLocked`, and an episode
 that stops at depth 0 hands back the base machine, which works. So a perfect 1.0 is available for
 zero risk and *doing nothing is the optimal policy*. Turning `allow_stop` on by itself measures
 that degenerate policy and nothing else.
